@@ -1,0 +1,23 @@
+# Binaries
+/anthropic-adapter
+*.exe
+*.test
+*.out
+
+# Env
+.env
+.env.local
+.env*.local
+.claude/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+*.swp
+*.swo
