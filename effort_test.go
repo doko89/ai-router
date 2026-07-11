@@ -110,3 +110,57 @@ func TestEffortOmittedWhenUnset(t *testing.T) {
 		t.Fatalf("effort should be omitted when unset, body=%s", captured[0])
 	}
 }
+
+func TestReasoningTokensForwardedAnthropic(t *testing.T) {
+	var mu sync.Mutex
+	var got string
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		got = string(b)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		// Anthropic-shaped response carrying reasoning_tokens in usage.
+		w.Write([]byte(`{"type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"model":"mock-model","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":10,"reasoning_tokens":3}}`))
+	}))
+	t.Cleanup(mock.Close)
+
+	cfg := &Config{
+		Gateway:    GatewayConfig{Host: "127.0.0.1", Port: 0, TiktokenEncoding: "cl100k_base"},
+		ClientKeys: []ClientKey{{Key: "test", Name: "test"}},
+		Providers:  []Provider{{Name: "mock", Enabled: true, Compatible: CompatibleAnthropic, BaseURL: mock.URL, APIKey: "x"}},
+		ModelAggregations: []ModelAggregation{{
+			Name: "m", Strategy: "failover",
+			Models: []AggModel{{Provider: "mock", Model: "mock-model"}},
+		}},
+	}
+	cfg.buildIndexes()
+	app := buildApp(cfg)
+
+	doReq(t, app, "/v1/chat/completions", "Bearer test",
+		`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	_ = got
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)))
+	req.Header.Set("Authorization", "Bearer test")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var m map[string]any
+	json.Unmarshal(body, &m)
+	usage, ok := m["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("no usage in response: %s", string(body))
+	}
+	if int(toFloat(usage["reasoning_tokens"])) != 3 {
+		t.Fatalf("want reasoning_tokens=3, got %v (body=%s)", usage["reasoning_tokens"], string(body))
+	}
+	if details, ok := usage["completion_tokens_details"].(map[string]any); !ok || int(toFloat(details["reasoning_tokens"])) != 3 {
+		t.Fatalf("want completion_tokens_details.reasoning_tokens=3, got %v (body=%s)", usage["completion_tokens_details"], string(body))
+	}
+}

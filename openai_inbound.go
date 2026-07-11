@@ -338,10 +338,11 @@ func transformAnthropicToOpenAIMap(resp map[string]any, model string) map[string
 		fr = "length"
 	}
 
-	var inTok, outTok int
+	var inTok, outTok, reasoningTok int
 	if usage, ok := resp["usage"].(map[string]any); ok {
 		inTok = int(toFloat(usage["input_tokens"]))
 		outTok = int(toFloat(usage["output_tokens"]))
+		reasoningTok = int(toFloat(usage["reasoning_tokens"]))
 	}
 
 	msg := map[string]any{"role": "assistant", "content": join(textParts, "\n")}
@@ -350,6 +351,16 @@ func transformAnthropicToOpenAIMap(resp map[string]any, model string) map[string
 	}
 	if len(toolCalls) > 0 {
 		msg["tool_calls"] = toolCalls
+	}
+
+	usageOut := map[string]any{
+		"prompt_tokens":     inTok,
+		"completion_tokens": outTok,
+		"total_tokens":      inTok + outTok,
+	}
+	if reasoningTok > 0 {
+		usageOut["reasoning_tokens"] = reasoningTok
+		usageOut["completion_tokens_details"] = map[string]any{"reasoning_tokens": reasoningTok}
 	}
 
 	return map[string]any{
@@ -362,11 +373,7 @@ func transformAnthropicToOpenAIMap(resp map[string]any, model string) map[string
 			"message":       msg,
 			"finish_reason": fr,
 		}},
-		"usage": map[string]any{
-			"prompt_tokens":     inTok,
-			"completion_tokens": outTok,
-			"total_tokens":      inTok + outTok,
-		},
+		"usage": usageOut,
 	}
 }
 
