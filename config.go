@@ -20,10 +20,11 @@ const (
 
 // GatewayConfig holds server-level settings.
 type GatewayConfig struct {
-	Host             string `yaml:"host"`
-	Port             int    `yaml:"port"`
-	Debug            bool   `yaml:"debug"`
-	TiktokenEncoding string `yaml:"tiktoken_encoding"`
+	Host              string `yaml:"host"`
+	Port              int    `yaml:"port"`
+	Debug             bool   `yaml:"debug"`
+	TiktokenEncoding  string `yaml:"tiktoken_encoding"`
+	RateLimitCooldown int    `yaml:"rate_limit_cooldown"` // seconds; 0 disables
 }
 
 // ClientKey is a caller-facing API key accepted by the gateway.
@@ -34,11 +35,12 @@ type ClientKey struct {
 
 // Provider is an upstream LLM endpoint.
 type Provider struct {
-	Name       string     `yaml:"name"`
-	Enabled    bool       `yaml:"enabled"`
-	Compatible Compatible `yaml:"compatible"`
-	BaseURL    string     `yaml:"base_url"`
-	APIKey     string     `yaml:"api_key"`
+	Name              string     `yaml:"name"`
+	Enabled           bool       `yaml:"enabled"`
+	Compatible        Compatible `yaml:"compatible"`
+	BaseURL           string     `yaml:"base_url"`
+	APIKey            string     `yaml:"api_key"`
+	RateLimitCooldown int        `yaml:"rate_limit_cooldown"` // per-provider override; 0 = use gateway default
 }
 
 // AggModel is one routable target inside an aggregation.

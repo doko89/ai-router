@@ -3,6 +3,9 @@ gateway:
   port: 8081
   debug: true
   # tiktoken_encoding: cl100k_base   # optional, used by /v1/messages/count_tokens
+  # rate_limit_cooldown: 30          # seconds a provider is skipped after a 429.
+                                    # 0 (default) disables cooldown; per-provider
+                                    # override below takes precedence.
 
 # Caller-facing keys. Send as `Authorization: Bearer <key>` or `x-api-key: <key>`.
 # Leave empty to disable auth (allow all).
@@ -26,6 +29,7 @@ providers:
     compatible: openai
     base_url: https://token-plan-sgp.xiaomimimo.com/v1
     api_key: tp-your-mimo-key
+    # rate_limit_cooldown: 60        # optional per-provider override (seconds)
 
 # Virtual models exposed via /v1/models. Requests using these names are routed
 # to a concrete provider+model according to `strategy`:

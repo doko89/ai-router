@@ -8,7 +8,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -19,6 +21,10 @@ type App struct {
 	cfg          *Config
 	client       *http.Client
 	streamClient *http.Client
+
+	// cooldowns maps a provider name to the time until which it should be
+	// skipped (rate-limited). Read/written concurrently.
+	cooldowns sync.Map
 }
 
 // NewApp creates an App with configured HTTP clients.
@@ -28,6 +34,83 @@ func NewApp(cfg *Config) *App {
 		client:       &http.Client{Timeout: 120 * time.Second},
 		streamClient: &http.Client{},
 	}
+}
+
+// effectiveCooldown returns the configured cooldown seconds for a provider
+// (per-provider override wins, else gateway default). 0 means disabled.
+func (a *App) effectiveCooldown(p *Provider) int {
+	if p.RateLimitCooldown > 0 {
+		return p.RateLimitCooldown
+	}
+	return a.cfg.Gateway.RateLimitCooldown
+}
+
+// isProviderCooling reports whether the provider is temporarily skipped.
+func (a *App) isProviderCooling(p *Provider) bool {
+	v, ok := a.cooldowns.Load(p.Name)
+	if !ok {
+		return false
+	}
+	until, ok := v.(time.Time)
+	return ok && time.Now().Before(until)
+}
+
+// markProviderCooldown records a cooldown for p, honoring a Retry-After header
+// when present, otherwise the configured cooldown. Returns false if cooling is
+// disabled or could not be determined.
+func (a *App) markProviderCooldown(p *Provider, retryAfter string) bool {
+	secs := parseRetryAfter(retryAfter)
+	if secs <= 0 {
+		secs = a.effectiveCooldown(p)
+	}
+	if secs <= 0 {
+		return false
+	}
+	a.cooldowns.Store(p.Name, time.Now().Add(time.Duration(secs)*time.Second))
+	return true
+}
+
+// retryAfterFor returns the largest remaining cooldown (seconds) among the
+// given candidates, or 0 if none are cooling.
+func (a *App) retryAfterFor(candidates []Target) int {
+	max := 0
+	for _, tgt := range candidates {
+		v, ok := a.cooldowns.Load(tgt.Provider.Name)
+		if !ok {
+			continue
+		}
+		until, ok := v.(time.Time)
+		if !ok {
+			continue
+		}
+		rem := int(time.Until(until).Seconds())
+		if rem < 0 {
+			rem = 0
+		}
+		if rem > max {
+			max = rem
+		}
+	}
+	return max
+}
+
+// parseRetryAfter parses an HTTP Retry-After value (delta-seconds or HTTP-date)
+// into seconds. Returns 0 if unparseable.
+func parseRetryAfter(header string) int {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0
+	}
+	if v, err := strconv.Atoi(header); err == nil && v > 0 {
+		return v
+	}
+	if t, err := http.ParseTime(header); err == nil {
+		secs := int(time.Until(t).Seconds())
+		if secs > 0 {
+			return secs
+		}
+	}
+	return 0
 }
 
 // anthropicError builds an Anthropic-formatted error payload.
@@ -88,12 +171,29 @@ func (a *App) handleMessages(c fiber.Ctx) error {
 	}
 
 	var lastErr string
+	rateLimited := false
 	for _, tgt := range candidates {
+		if a.isProviderCooling(tgt.Provider) {
+			if a.cfg.Gateway.Debug {
+				log.Printf("  provider=%s model=%s skipped (rate-limit cooldown)", tgt.Provider.Name, tgt.Model)
+			}
+			continue
+		}
 		resp, err := a.dispatch(tgt, bodyBytes, &req)
 		if err != nil {
 			lastErr = err.Error()
 			if a.cfg.Gateway.Debug {
 				log.Printf("  provider=%s model=%s dial error: %v", tgt.Provider.Name, tgt.Model, err)
+			}
+			continue
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			rateLimited = true
+			a.markProviderCooldown(tgt.Provider, resp.Header.Get("Retry-After"))
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if a.cfg.Gateway.Debug {
+				log.Printf("  provider=%s model=%s rate limited; cooling down", tgt.Provider.Name, tgt.Model)
 			}
 			continue
 		}
@@ -111,6 +211,16 @@ func (a *App) handleMessages(c fiber.Ctx) error {
 			return a.streamResponse(c, tgt.Provider.Compatible, resp)
 		}
 		return a.jsonResponse(c, tgt.Provider.Compatible, resp)
+	}
+
+	if rateLimited {
+		retryAfter := a.retryAfterFor(candidates)
+		if retryAfter <= 0 {
+			retryAfter = 1
+		}
+		c.Set(fiber.HeaderRetryAfter, fmt.Sprintf("%d", retryAfter))
+		return c.Status(fiber.StatusTooManyRequests).JSON(
+			anthropicError("rate_limit_error", fmt.Sprintf("all providers rate limited; retry after %d seconds", retryAfter)))
 	}
 
 	return c.Status(fiber.StatusBadGateway).JSON(
@@ -254,12 +364,29 @@ func (a *App) handleChatCompletions(c fiber.Ctx) error {
 	}
 
 	var lastErr string
+	rateLimited := false
 	for _, tgt := range candidates {
+		if a.isProviderCooling(tgt.Provider) {
+			if a.cfg.Gateway.Debug {
+				log.Printf("  provider=%s model=%s skipped (rate-limit cooldown)", tgt.Provider.Name, tgt.Model)
+			}
+			continue
+		}
 		resp, err := a.dispatch(tgt, bodyBytes, req)
 		if err != nil {
 			lastErr = err.Error()
 			if a.cfg.Gateway.Debug {
 				log.Printf("  provider=%s model=%s dial error: %v", tgt.Provider.Name, tgt.Model, err)
+			}
+			continue
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			rateLimited = true
+			a.markProviderCooldown(tgt.Provider, resp.Header.Get("Retry-After"))
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if a.cfg.Gateway.Debug {
+				log.Printf("  provider=%s model=%s rate limited; cooling down", tgt.Provider.Name, tgt.Model)
 			}
 			continue
 		}
@@ -277,6 +404,15 @@ func (a *App) handleChatCompletions(c fiber.Ctx) error {
 			return a.streamResponseOpenAI(c, tgt.Provider.Compatible, resp, req.Model)
 		}
 		return a.jsonResponseOpenAI(c, tgt.Provider.Compatible, resp, req.Model)
+	}
+
+	if rateLimited {
+		retryAfter := a.retryAfterFor(candidates)
+		if retryAfter <= 0 {
+			retryAfter = 1
+		}
+		c.Set(fiber.HeaderRetryAfter, fmt.Sprintf("%d", retryAfter))
+		return c.Status(fiber.StatusTooManyRequests).JSON(openAIError("rate_limit_error", fmt.Sprintf("all providers rate limited; retry after %d seconds", retryAfter)))
 	}
 
 	return c.Status(fiber.StatusBadGateway).JSON(openAIError("api_error", "all providers failed: "+lastErr))
