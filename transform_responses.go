@@ -68,6 +68,10 @@ func transformRequestBodyV1Responses(req *AnthropicRequest) map[string]any {
 		body["frequency_penalty"] = *req.FrequencyPenalty
 	}
 
+	if e := req.effort(); e != "" {
+		body["reasoning"] = map[string]any{"effort": e}
+	}
+
 	if len(tools) > 0 {
 		body["tools"] = tools
 		if req.ToolChoice != nil {

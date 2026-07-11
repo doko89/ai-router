@@ -215,6 +215,122 @@ func copyStream(w *bufio.Writer, body io.Reader) {
 	}
 }
 
+// handleChatCompletions implements POST /v1/chat/completions (OpenAI inbound).
+// The request is converted to the canonical Anthropic shape, routed through the
+// same dispatch path, and the provider response is translated back to OpenAI.
+func (a *App) handleChatCompletions(c fiber.Ctx) error {
+	name, ok := a.authenticate(c)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(
+			openAIError("authentication_error", "Invalid or missing client API key"))
+	}
+
+	var oreq OpenAIChatRequest
+	if err := json.Unmarshal(c.Body(), &oreq); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(openAIError("invalid_request_error", err.Error()))
+	}
+
+	req, err := parseOpenAIRequest(&oreq)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(openAIError("invalid_request_error", err.Error()))
+	}
+	bodyBytes, err := json.Marshal(req)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(openAIError("api_error", err.Error()))
+	}
+
+	candidates, exists := a.cfg.resolveCandidates(req.Model)
+	if !exists {
+		return c.Status(fiber.StatusNotFound).JSON(openAIError("not_found_error",
+			fmt.Sprintf("model %q not found. Available: %s", req.Model, strings.Join(a.cfg.aggregationNames(), ", "))))
+	}
+	if len(candidates) == 0 {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(openAIError("unavailable_error",
+			fmt.Sprintf("no enabled provider available for model %q", req.Model)))
+	}
+
+	if a.cfg.Gateway.Debug {
+		log.Printf("[%s|openai] model=%q stream=%v candidates=%d", name, req.Model, req.Stream, len(candidates))
+	}
+
+	var lastErr string
+	for _, tgt := range candidates {
+		resp, err := a.dispatch(tgt, bodyBytes, req)
+		if err != nil {
+			lastErr = err.Error()
+			if a.cfg.Gateway.Debug {
+				log.Printf("  provider=%s model=%s dial error: %v", tgt.Provider.Name, tgt.Model, err)
+			}
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			data, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Sprintf("upstream %d from %s", resp.StatusCode, tgt.Provider.Name)
+			if a.cfg.Gateway.Debug {
+				log.Printf("  provider=%s model=%s status=%d body=%s", tgt.Provider.Name, tgt.Model, resp.StatusCode, string(data))
+			}
+			continue
+		}
+
+		if req.Stream {
+			return a.streamResponseOpenAI(c, tgt.Provider.Compatible, resp, req.Model)
+		}
+		return a.jsonResponseOpenAI(c, tgt.Provider.Compatible, resp, req.Model)
+	}
+
+	return c.Status(fiber.StatusBadGateway).JSON(openAIError("api_error", "all providers failed: "+lastErr))
+}
+
+// jsonResponseOpenAI transforms and returns a non-streaming upstream response in
+// OpenAI chat/completions shape.
+func (a *App) jsonResponseOpenAI(c fiber.Ctx, compat Compatible, resp *http.Response, model string) error {
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+
+	switch compat {
+	case CompatibleAnthropic:
+		var parsed map[string]any
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			return c.Status(fiber.StatusBadGateway).JSON(openAIError("api_error", err.Error()))
+		}
+		return c.JSON(transformAnthropicToOpenAIMap(parsed, model))
+	case CompatibleOpenAIResponses:
+		var parsed V1ResponsesResponse
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			return c.Status(fiber.StatusBadGateway).JSON(openAIError("api_error", err.Error()))
+		}
+		return c.JSON(transformAnthropicToOpenAIMap(transformV1ResponsesResponse(&parsed), model))
+	default:
+		var parsed map[string]any
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			return c.Status(fiber.StatusBadGateway).JSON(openAIError("api_error", err.Error()))
+		}
+		parsed["model"] = model
+		return c.JSON(parsed)
+	}
+}
+
+// streamResponseOpenAI transforms and streams an upstream SSE response in
+// OpenAI chat/completions shape.
+func (a *App) streamResponseOpenAI(c fiber.Ctx, compat Compatible, resp *http.Response, model string) error {
+	c.Set(fiber.HeaderContentType, "text/event-stream")
+	c.Set(fiber.HeaderCacheControl, "no-cache")
+	c.Set(fiber.HeaderConnection, "keep-alive")
+
+	return c.SendStreamWriter(func(w *bufio.Writer) {
+		defer resp.Body.Close()
+		switch compat {
+		case CompatibleAnthropic:
+			streamAnthropicToOpenAI(w, resp.Body, model)
+		case CompatibleOpenAIResponses:
+			streamV1ResponsesToOpenAI(w, resp.Body, model)
+		default:
+			copyStream(w, resp.Body)
+		}
+	})
+}
+
 // handleCountTokens implements POST /v1/messages/count_tokens.
 func (a *App) handleCountTokens(c fiber.Ctx) error {
 	if _, ok := a.authenticate(c); !ok {
@@ -242,14 +358,17 @@ func (a *App) handleListModels(c fiber.Ctx) error {
 	data := make([]map[string]any, 0, len(names))
 	for _, n := range names {
 		data = append(data, map[string]any{
-			"type":         "model",
-			"id":           n,
-			"display_name": n,
-			"created_at":   created,
+			"id":            n,
+			"object":        "model",
+			"type":          "model",
+			"display_name":  n,
+			"created_at":    created,
+			"owned_by":      "anthropic-gateway",
 		})
 	}
 
 	resp := map[string]any{
+		"object":   "list",
 		"data":     data,
 		"has_more": false,
 	}

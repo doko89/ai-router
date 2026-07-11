@@ -19,6 +19,32 @@ type AnthropicRequest struct {
 	FrequencyPenalty *float64           `json:"frequency_penalty,omitempty"`
 	StopSequences    []string           `json:"stop_sequences,omitempty"`
 	Stream           bool               `json:"stream,omitempty"`
+	OutputConfig     *OutputConfig      `json:"output_config,omitempty"`
+	Thinking         *ThinkingConfig    `json:"thinking,omitempty"`
+}
+
+// OutputConfig carries the Anthropic effort parameter.
+type OutputConfig struct {
+	Effort string `json:"effort,omitempty"`
+}
+
+// ThinkingConfig mirrors Anthropic's thinking parameter (may carry effort).
+type ThinkingConfig struct {
+	Type    string `json:"type,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+	Display string `json:"display,omitempty"`
+}
+
+// effort returns the requested reasoning effort, checking both the modern
+// output_config location and the historical thinking.effort location.
+func (r *AnthropicRequest) effort() string {
+	if r.OutputConfig != nil && r.OutputConfig.Effort != "" {
+		return r.OutputConfig.Effort
+	}
+	if r.Thinking != nil && r.Thinking.Effort != "" {
+		return r.Thinking.Effort
+	}
+	return ""
 }
 
 // AnthropicMessage is a single message in the conversation.
@@ -89,6 +115,17 @@ func (s *StringOrBlocks) UnmarshalJSON(data []byte) error {
 	}
 	s.IsString = false
 	return json.Unmarshal(trimmed, &s.Blocks)
+}
+
+// MarshalJSON encodes either a string or an array of content blocks.
+func (s *StringOrBlocks) MarshalJSON() ([]byte, error) {
+	if s == nil {
+		return []byte("null"), nil
+	}
+	if s.IsString {
+		return json.Marshal(s.Str)
+	}
+	return json.Marshal(s.Blocks)
 }
 
 // PlainText returns the flattened text of the value. For a string it returns
