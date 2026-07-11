@@ -499,7 +499,7 @@ func (a *App) handleListModels(c fiber.Ctx) error {
 			"type":          "model",
 			"display_name":  n,
 			"created_at":    created,
-			"owned_by":      "anthropic-gateway",
+			"owned_by":      "ai-router",
 		})
 	}
 

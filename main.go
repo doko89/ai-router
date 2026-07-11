@@ -21,7 +21,7 @@ func main() {
 	app := buildApp(cfg)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Gateway.Host, cfg.Gateway.Port)
-	fmt.Printf("🚀 Anthropic Gateway on %s\n", addr)
+	fmt.Printf("🚀 AI Router on %s\n", addr)
 	fmt.Printf("🧩 Providers: %d | Aggregations: %d | Client keys: %d\n",
 		len(cfg.Providers), len(cfg.ModelAggregations), len(cfg.ClientKeys))
 
@@ -32,7 +32,7 @@ func main() {
 
 // buildApp wires up the Fiber application, middleware, and routes.
 func buildApp(cfg *Config) *fiber.App {
-	app := fiber.New(fiber.Config{AppName: "Anthropic Gateway"})
+	app := fiber.New(fiber.Config{AppName: "AI Router"})
 
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: []string{"*"},

@@ -1,6 +1,7 @@
 # Binaries
 /anthropic-adapter
 /anthropic-gateway
+/ai-router
 *.exe
 *.test
 *.out
