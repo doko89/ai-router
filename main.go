@@ -7,29 +7,23 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
-	"github.com/joho/godotenv"
 )
 
 func main() {
-	_ = godotenv.Load()
-	cfg := LoadConfig()
-
-	baseURL := flag.String("base-url", cfg.OpenAIBaseURL, "Target OpenAI-compatible API URL")
-	apiKey := flag.String("api-key", cfg.OpenAIAPIKey, "Target OpenAI API Key (can also pass via x-api-key header)")
-	host := flag.String("host", cfg.Host, "Host to bind the adapter to")
-	port := flag.Int("port", cfg.Port, "Port to bind the adapter to")
+	configPath := flag.String("config", "config.yaml", "Path to the YAML config file")
 	flag.Parse()
 
-	cfg.Update(*baseURL, *apiKey)
-	cfg.Host = *host
-	cfg.Port = *port
+	cfg, err := LoadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("config error: %v", err)
+	}
 
 	app := buildApp(cfg)
 
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	fmt.Printf("🚀 Starting Anthropic Adapter on %s\n", addr)
-	fmt.Printf("🔗 Proxying to: %s\n", cfg.OpenAIBaseURL)
-	fmt.Printf("🧭 API type: %s\n", cfg.APIType)
+	addr := fmt.Sprintf("%s:%d", cfg.Gateway.Host, cfg.Gateway.Port)
+	fmt.Printf("🚀 Anthropic Gateway on %s\n", addr)
+	fmt.Printf("🧩 Providers: %d | Aggregations: %d | Client keys: %d\n",
+		len(cfg.Providers), len(cfg.ModelAggregations), len(cfg.ClientKeys))
 
 	if err := app.Listen(addr); err != nil {
 		log.Fatal(err)
@@ -38,25 +32,19 @@ func main() {
 
 // buildApp wires up the Fiber application, middleware, and routes.
 func buildApp(cfg *Config) *fiber.App {
-	app := fiber.New(fiber.Config{
-		AppName: "Anthropic Adapter",
-	})
+	app := fiber.New(fiber.Config{AppName: "Anthropic Gateway"})
 
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"*"},
-		AllowMethods:     []string{"*"},
-		AllowHeaders:     []string{"*"},
-		AllowCredentials: false,
+		AllowOrigins: []string{"*"},
+		AllowMethods: []string{"*"},
+		AllowHeaders: []string{"*"},
 	}))
 
-	handlers := NewApp(cfg)
+	h := NewApp(cfg)
 
-	app.Post("/v1/messages", handlers.handleMessages)
-	app.Post("/v1/messages/count_tokens", handlers.handleCountTokens)
-
-	for _, r := range app.GetRoutes() {
-		fmt.Printf("  Route: %s [%s]\n", r.Path, r.Method)
-	}
+	app.Post("/v1/messages", h.handleMessages)
+	app.Post("/v1/messages/count_tokens", h.handleCountTokens)
+	app.Get("/v1/models", h.handleListModels)
 
 	return app
 }

@@ -1,13 +1,16 @@
 # Binaries
 /anthropic-adapter
+/anthropic-gateway
 *.exe
 *.test
 *.out
 
+# Local config (contains secrets)
+config.yaml
+
 # Env
 .env
 .env.local
-.env*.local
 .claude/
 
 # IDE

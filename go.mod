@@ -5,8 +5,8 @@ go 1.26.4
 require (
 	github.com/gofiber/fiber/v3 v3.4.0
 	github.com/google/uuid v1.6.0
-	github.com/joho/godotenv v1.5.1
 	github.com/pkoukk/tiktoken-go v0.1.8
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

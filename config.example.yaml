@@ -1,0 +1,54 @@
+gateway:
+  host: 127.0.0.1
+  port: 8081
+  debug: true
+  # tiktoken_encoding: cl100k_base   # optional, used by /v1/messages/count_tokens
+
+# Caller-facing keys. Send as `Authorization: Bearer <key>` or `x-api-key: <key>`.
+# Leave empty to disable auth (allow all).
+client_keys:
+  - key: ak-622b8bf3c894092ccc8999c9c4a6f6b550392233b23dc922
+    name: dev
+
+# Upstream providers. `compatible` is one of:
+#   openai            -> POST {base_url}/chat/completions
+#   openai-responses  -> POST {base_url}/responses
+#   anthropic         -> POST {base_url}/messages  (passthrough, no translation)
+providers:
+  - name: oc1
+    enabled: true
+    compatible: openai
+    base_url: https://opencode.ai/zen/v1
+    api_key: sk-your-opencode-key
+
+  - name: mimo
+    enabled: false
+    compatible: openai
+    base_url: https://token-plan-sgp.xiaomimimo.com/v1
+    api_key: tp-your-mimo-key
+
+# Virtual models exposed via /v1/models. Requests using these names are routed
+# to a concrete provider+model according to `strategy`:
+#   failover     -> try in declared order
+#   round_robin  -> rotate across targets (with failover to the rest)
+#   weighted     -> weighted-random pick (with failover to the rest)
+model_aggregations:
+  - name: flash
+    strategy: round_robin
+    models:
+      - provider: oc1
+        model: deepseek-v4-flash-free
+        weight: 50
+      - provider: oc4
+        model: deepseek-v4-flash-free
+        weight: 50
+
+  - name: pro
+    strategy: weighted
+    models:
+      - provider: mimo
+        model: mimo-v2.5-pro
+        weight: 70
+      - provider: oc1
+        model: glm-5.2
+        weight: 30

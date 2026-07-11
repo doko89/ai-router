@@ -1,75 +1,166 @@
 package main
 
 import (
+	"fmt"
 	"os"
-	"strconv"
 	"strings"
+	"sync/atomic"
+
+	"gopkg.in/yaml.v3"
 )
 
-// APIType identifies which upstream OpenAI-compatible API dialect is targeted.
-type APIType string
+// Compatible identifies the upstream API dialect of a provider.
+type Compatible string
 
 const (
-	APIChatCompletions APIType = "v1_chat_completions"
-	APIResponses       APIType = "v1_responses"
+	CompatibleOpenAI          Compatible = "openai"           // {base_url}/chat/completions
+	CompatibleOpenAIResponses Compatible = "openai-responses" // {base_url}/responses
+	CompatibleAnthropic       Compatible = "anthropic"        // {base_url}/messages (passthrough)
 )
 
-// Config holds runtime configuration for the adapter.
+// GatewayConfig holds server-level settings.
+type GatewayConfig struct {
+	Host             string `yaml:"host"`
+	Port             int    `yaml:"port"`
+	Debug            bool   `yaml:"debug"`
+	TiktokenEncoding string `yaml:"tiktoken_encoding"`
+}
+
+// ClientKey is a caller-facing API key accepted by the gateway.
+type ClientKey struct {
+	Key  string `yaml:"key"`
+	Name string `yaml:"name"`
+}
+
+// Provider is an upstream LLM endpoint.
+type Provider struct {
+	Name       string     `yaml:"name"`
+	Enabled    bool       `yaml:"enabled"`
+	Compatible Compatible `yaml:"compatible"`
+	BaseURL    string     `yaml:"base_url"`
+	APIKey     string     `yaml:"api_key"`
+}
+
+// AggModel is one routable target inside an aggregation.
+type AggModel struct {
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
+	Weight   int    `yaml:"weight"`
+}
+
+// ModelAggregation maps a virtual model name to one or more provider targets
+// selected via a routing strategy.
+type ModelAggregation struct {
+	Name     string     `yaml:"name"`
+	Strategy string     `yaml:"strategy"`
+	Models   []AggModel `yaml:"models"`
+
+	rr atomic.Uint64 // round-robin counter
+}
+
+// Config is the full gateway configuration.
 type Config struct {
-	OpenAIBaseURL    string
-	OpenAIAPIKey     string
-	TiktokenEncoding string
-	Host             string
-	Port             int
-	APIType          APIType
+	Gateway           GatewayConfig      `yaml:"gateway"`
+	ClientKeys        []ClientKey        `yaml:"client_keys"`
+	Providers         []Provider         `yaml:"providers"`
+	ModelAggregations []ModelAggregation `yaml:"model_aggregations"`
+
+	providerByName map[string]*Provider
+	aggByName      map[string]*ModelAggregation
 }
 
-// LoadConfig builds a Config from environment variables with sensible defaults.
-func LoadConfig() *Config {
-	c := &Config{
-		OpenAIBaseURL:    getenv("OPENAI_BASE_URL", "https://api.openai.com/v1/chat/completions"),
-		OpenAIAPIKey:     os.Getenv("OPENAI_API_KEY"),
-		TiktokenEncoding: getenv("TIKTOKEN_ENCODING", "cl100k_base"),
-		Host:             getenv("HOST", "0.0.0.0"),
-		Port:             getenvInt("PORT", 8000),
+// LoadConfig reads and validates a YAML configuration file.
+func LoadConfig(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
 	}
-	c.detectAPIType()
-	return c
+	var c Config
+	if err := yaml.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	c.applyDefaults()
+	c.buildIndexes()
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
-// detectAPIType auto-detects the upstream API dialect from the base URL.
-func (c *Config) detectAPIType() {
-	switch {
-	case strings.Contains(c.OpenAIBaseURL, "/v1/responses"):
-		c.APIType = APIResponses
-	default:
-		c.APIType = APIChatCompletions
+func (c *Config) applyDefaults() {
+	if c.Gateway.Host == "" {
+		c.Gateway.Host = "127.0.0.1"
 	}
-}
-
-// Update applies runtime overrides (builder/CLI pattern) and re-detects API type.
-func (c *Config) Update(baseURL, apiKey string) {
-	if baseURL != "" {
-		c.OpenAIBaseURL = baseURL
-		c.detectAPIType()
+	if c.Gateway.Port == 0 {
+		c.Gateway.Port = 8081
 	}
-	if apiKey != "" {
-		c.OpenAIAPIKey = apiKey
+	if c.Gateway.TiktokenEncoding == "" {
+		c.Gateway.TiktokenEncoding = "cl100k_base"
 	}
-}
-
-func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func getenvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
+	for i := range c.Providers {
+		if c.Providers[i].Compatible == "" {
+			c.Providers[i].Compatible = CompatibleOpenAI
 		}
 	}
-	return def
+	for i := range c.ModelAggregations {
+		if c.ModelAggregations[i].Strategy == "" {
+			c.ModelAggregations[i].Strategy = "failover"
+		}
+	}
+}
+
+func (c *Config) buildIndexes() {
+	c.providerByName = make(map[string]*Provider, len(c.Providers))
+	for i := range c.Providers {
+		c.providerByName[c.Providers[i].Name] = &c.Providers[i]
+	}
+	c.aggByName = make(map[string]*ModelAggregation, len(c.ModelAggregations))
+	for i := range c.ModelAggregations {
+		c.aggByName[c.ModelAggregations[i].Name] = &c.ModelAggregations[i]
+	}
+}
+
+func (c *Config) validate() error {
+	if len(c.ModelAggregations) == 0 {
+		return fmt.Errorf("no model_aggregations defined")
+	}
+	for i := range c.ModelAggregations {
+		agg := &c.ModelAggregations[i]
+		if len(agg.Models) == 0 {
+			return fmt.Errorf("aggregation %q has no models", agg.Name)
+		}
+		switch agg.Strategy {
+		case "failover", "round_robin", "weighted":
+		default:
+			return fmt.Errorf("aggregation %q has unknown strategy %q", agg.Name, agg.Strategy)
+		}
+	}
+	return nil
+}
+
+// providerEndpoint returns the upstream URL for a provider based on its dialect.
+func (p *Provider) endpoint() string {
+	base := strings.TrimRight(p.BaseURL, "/")
+	switch p.Compatible {
+	case CompatibleOpenAIResponses:
+		return base + "/responses"
+	case CompatibleAnthropic:
+		return base + "/messages"
+	default:
+		return base + "/chat/completions"
+	}
+}
+
+// authClient returns (client name, true) if the given key is authorized. When
+// no client keys are configured, all requests are allowed.
+func (c *Config) authClient(key string) (string, bool) {
+	if len(c.ClientKeys) == 0 {
+		return "anonymous", true
+	}
+	for _, ck := range c.ClientKeys {
+		if ck.Key == key && key != "" {
+			return ck.Name, true
+		}
+	}
+	return "", false
 }

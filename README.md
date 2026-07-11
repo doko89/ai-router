@@ -1,121 +1,120 @@
-# 🚀 Anthropic Adapter (Go)
+# 🚀 Anthropic Gateway (Go)
 
 ![Anthropic Adapter Logo](Anthropic-Adapter.png "Anthropic Adapter")
 
-An open-source API adapter that translates between the **Anthropic** and **OpenAI** message formats, enabling seamless interoperability. This is a Go rewrite (Fiber v3) of the original Python/FastAPI project.
-
-## 📋 Overview
-
-The Anthropic Adapter is a lightweight proxy server that bridges the gap between the **Anthropic API** (`v1/messages`) and **OpenAI-compatible APIs** (`v1/chat/completions` and `v1/responses`). It transforms requests and responses between the two formats, letting you use any OpenAI-compatible LLM provider with Anthropic SDKs (including Claude Code).
+An Anthropic-facing **multi-provider LLM gateway**. It exposes the Anthropic API
+(`/v1/messages`) and routes requests to any number of upstream providers
+(OpenAI-compatible or Anthropic-compatible), translating message formats on the
+fly. Originally a Python/FastAPI single-provider adapter; rewritten in Go
+(Fiber v3) as a configurable gateway.
 
 ## 🎯 Features
 
-- ✅ **Format Translation** — Anthropic ⇄ OpenAI message conversion
-- ✅ **Dual API Support** — works with both `v1/chat/completions` and `v1/responses`
-- ✅ **Auto-Detection** — picks the transformation based on your base URL
-- ✅ **Streaming** — real-time SSE streaming with correct Anthropic event framing
-- ✅ **Token Counting** — `count_tokens` endpoint backed by tiktoken
-- ✅ **Multimodal** — text, images, and tool calls
-- ✅ **Configurable** — via environment variables or CLI flags
-- ✅ **Error Handling** — upstream errors mapped to Anthropic error format
-- ✅ **CORS** — permissive by default
+- ✅ **Multi-provider** — register many upstreams (`openai`, `openai-responses`, `anthropic`)
+- ✅ **Model aggregation** — virtual model names routed by strategy: `failover`, `round_robin`, `weighted`
+- ✅ **Automatic failover** — every strategy falls back to remaining targets on error
+- ✅ **Format translation** — Anthropic ⇄ OpenAI (chat/completions & responses); Anthropic passthrough
+- ✅ **Streaming** — SSE with correct Anthropic event framing
+- ✅ **Client auth** — gateway-level API keys (`Authorization: Bearer` or `x-api-key`)
+- ✅ **`/v1/models`** — lists your model aggregations
+- ✅ **Token counting** — `/v1/messages/count_tokens` (tiktoken)
+- ✅ **YAML config**
 
-## 📦 Installation
+## 📦 Build
 
-### Prerequisites
-
-- Go 1.26+
-
-### Build
+Requires Go 1.26+.
 
 ```bash
-go build -o anthropic-adapter .
+go build -o anthropic-gateway .
 ```
 
-## 🚀 Usage
+## ⚙️ Configuration
 
-### CLI
+Copy the example and edit it:
 
 ```bash
-./anthropic-adapter --port 9000 --base-url "http://localhost:1234/v1/chat/completions" --api-key "sk-..."
+cp config.example.yaml config.yaml
 ```
 
-Available flags:
+```yaml
+gateway:
+  host: 127.0.0.1
+  port: 8081
+  debug: true
 
-| Flag         | Default                                           | Description                                    |
-| ------------ | ------------------------------------------------- | ---------------------------------------------- |
-| `--base-url` | `https://api.openai.com/v1/chat/completions`      | Target OpenAI-compatible API URL               |
-| `--api-key`  | (from env)                                        | Upstream API key (or pass via `x-api-key`)     |
-| `--host`     | `0.0.0.0`                                          | Bind host                                      |
-| `--port`     | `8000`                                             | Bind port                                      |
+client_keys:              # callers must present one of these keys
+  - key: ak-xxxxxxxx
+    name: dev
 
-### Environment Variables
+providers:
+  - name: oc1
+    enabled: true
+    compatible: openai    # openai | openai-responses | anthropic
+    base_url: https://opencode.ai/zen/v1
+    api_key: sk-...
 
-Create a `.env` file (see `.env.example`):
-
-```bash
-# For v1/chat/completions (default)
-OPENAI_BASE_URL=https://api.openai.com/v1/chat/completions
-# For v1/responses (newer API)
-# OPENAI_BASE_URL=https://api.openai.com/v1/responses
-
-OPENAI_API_KEY=your-api-key-here
-HOST=0.0.0.0
-PORT=8000
-TIKTOKEN_ENCODING=cl100k_base
+model_aggregations:
+  - name: flash           # virtual model name used by clients
+    strategy: round_robin # failover | round_robin | weighted
+    models:
+      - provider: oc1
+        model: deepseek-v4-flash-free
+        weight: 50
 ```
 
-The adapter automatically detects which API format to use based on `OPENAI_BASE_URL`.
+**`compatible` → upstream endpoint:**
 
-### Using with Claude Code
+| Value              | Endpoint                        | Translation                    |
+| ------------------ | ------------------------------- | ------------------------------ |
+| `openai`           | `{base_url}/chat/completions`   | Anthropic ⇄ OpenAI chat        |
+| `openai-responses` | `{base_url}/responses`          | Anthropic ⇄ OpenAI responses   |
+| `anthropic`        | `{base_url}/messages`           | passthrough (no translation)   |
+
+Disabled providers, and targets referencing unknown providers, are skipped when
+building the candidate list. If `client_keys` is empty, auth is disabled.
+
+## 🚀 Run
 
 ```bash
-export ANTHROPIC_BASE_URL="http://localhost:8000"
-export ANTHROPIC_AUTH_TOKEN="your-api-key-here"
-export ANTHROPIC_API_KEY=""  # Must be explicitly empty
+./anthropic-gateway --config config.yaml
 ```
 
-Override model aliases to point at your provider's models:
+## 🛠️ API
+
+### `POST /v1/messages`
+Anthropic `v1/messages` body. Set `model` to an **aggregation name**. Supports
+`stream: true`. Auth required.
+
+### `POST /v1/messages/count_tokens`
+Returns `{ "input_tokens": <n> }`.
+
+### `GET /v1/models`
+Lists model aggregations in Anthropic models format.
+
+## 🤝 Using with Claude Code
 
 ```bash
-export ANTHROPIC_DEFAULT_SONNET_MODEL="<MODEL_1>"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="<MODEL_2>"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="<MODEL_3>"
+export ANTHROPIC_BASE_URL="http://localhost:8081"
+export ANTHROPIC_AUTH_TOKEN="ak-xxxxxxxx"     # a gateway client key
+export ANTHROPIC_API_KEY=""
+export ANTHROPIC_DEFAULT_SONNET_MODEL="flash" # an aggregation name
+export ANTHROPIC_DEFAULT_OPUS_MODEL="pro"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="flash"
 ```
 
 ## 🔧 Architecture
 
-| File                     | Responsibility                                             |
-| ------------------------ | --------------------------------------------------------- |
-| `main.go`                | CLI flags, Fiber app, routes, server bootstrap            |
-| `config.go`              | Configuration + API-type auto-detection                   |
-| `types.go`               | Anthropic request types + polymorphic JSON decoding       |
-| `transform.go`           | `v1/chat/completions` request/response transforms         |
-| `transform_responses.go` | `v1/responses` request/response transforms                |
-| `stream.go`              | SSE streaming translation for both APIs                   |
-| `token.go`               | tiktoken-based token counting                             |
-| `handlers.go`            | HTTP handlers + upstream forwarding                       |
-
-### Data Flow
-
-```
-Anthropic → [Transform] → OpenAI → [Forward] → Upstream API → [Response] → [Transform] → Anthropic
-```
-
-## 🛠️ API Endpoints
-
-### `POST /v1/messages`
-
-Message creation and streaming.
-
-- **Headers:** `x-api-key` — your upstream API key (or set via env)
-- **Body:** standard Anthropic `v1/messages` JSON; set `stream: true` for SSE
-- **Response:** Anthropic message format (SSE stream when streaming)
-
-### `POST /v1/messages/count_tokens`
-
-- **Body:** Anthropic-format request
-- **Response:** `{ "input_tokens": <n> }`
+| File                     | Responsibility                                       |
+| ------------------------ | ---------------------------------------------------- |
+| `main.go`                | flags, Fiber app, routes, bootstrap                  |
+| `config.go`              | YAML config, providers, aggregations, auth           |
+| `router.go`              | aggregation resolution + routing strategies          |
+| `handlers.go`            | auth, dispatch, failover, `/v1/models`               |
+| `types.go`               | Anthropic request types + polymorphic decoding       |
+| `transform.go`           | `chat/completions` request/response transforms       |
+| `transform_responses.go` | `responses` request/response transforms              |
+| `stream.go`              | SSE streaming translation                            |
+| `token.go`               | tiktoken token counting                              |
 
 ## 📄 License
 
