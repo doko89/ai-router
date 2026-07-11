@@ -24,7 +24,7 @@ type GatewayConfig struct {
 	Port              int    `yaml:"port"`
 	Debug             bool   `yaml:"debug"`
 	TiktokenEncoding  string `yaml:"tiktoken_encoding"`
-	RateLimitCooldown int    `yaml:"rate_limit_cooldown"` // seconds; 0 disables
+	RateLimitCooldown int    `yaml:"rate_limit_cooldown"` // seconds; default 600 (10 min), 0 disables
 }
 
 // ClientKey is a caller-facing API key accepted by the gateway.
@@ -98,6 +98,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Gateway.TiktokenEncoding == "" {
 		c.Gateway.TiktokenEncoding = "cl100k_base"
+	}
+	if c.Gateway.RateLimitCooldown == 0 {
+		c.Gateway.RateLimitCooldown = 600
 	}
 	for i := range c.Providers {
 		if c.Providers[i].Compatible == "" {
