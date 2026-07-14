@@ -41,10 +41,10 @@ jobs:
           fi
           go build -trimpath -ldflags="-s -w" -o "${OUT}" .
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip "${OUT%.exe}.zip" "${OUT}"
+            zip "${OUT%.exe}.zip" "${OUT}" config.example.yaml
             echo "ASSET=${OUT%.exe}.zip" >> "$GITHUB_ENV"
           else
-            tar -czf "${OUT}.tar.gz" "${OUT}"
+            tar -czf "${OUT}.tar.gz" "${OUT}" config.example.yaml
             echo "ASSET=${OUT}.tar.gz" >> "$GITHUB_ENV"
           fi
 

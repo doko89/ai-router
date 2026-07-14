@@ -25,6 +25,7 @@ type GatewayConfig struct {
 	Debug             bool   `yaml:"debug"`
 	TiktokenEncoding  string `yaml:"tiktoken_encoding"`
 	RateLimitCooldown int    `yaml:"rate_limit_cooldown"` // seconds; default 600 (10 min), 0 disables
+	Compression       string `yaml:"compression"`         // off, lite, standard, aggressive; empty = off
 }
 
 // ClientKey is a caller-facing API key accepted by the gateway.

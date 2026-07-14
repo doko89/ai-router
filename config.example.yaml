@@ -2,10 +2,17 @@ gateway:
   host: 127.0.0.1
   port: 8081
   debug: true
+  compression: aggressive
   # tiktoken_encoding: cl100k_base   # optional, used by /v1/messages/count_tokens
   # rate_limit_cooldown: 600         # seconds a provider is skipped after a 429
                                     # (default 600 = 10 minutes). Set 0 to disable;
                                     # per-provider override below takes precedence.
+  # compression: standard           # off, lite, standard, aggressive
+                                    # Compresses text content before sending to
+                                    # upstream provider to save tokens:
+                                    #   lite       - ANSI strip + basic filler removal
+                                    #   standard   - + phrase condensation + line dedup
+                                    #   aggressive - + head/tail truncation
 
 # Caller-facing keys. Send as `Authorization: Bearer <key>` or `x-api-key: <key>`.
 # Leave empty to disable auth (allow all).

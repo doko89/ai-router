@@ -156,6 +156,11 @@ func (a *App) handleMessages(c fiber.Ctx) error {
 			anthropicError("invalid_request_error", err.Error()))
 	}
 
+	if a.cfg.Gateway.Compression != "" && a.cfg.Gateway.Compression != CompressionOff {
+		compressAnthropicRequest(&req, a.cfg.Gateway.Compression)
+		bodyBytes, _ = json.Marshal(req)
+	}
+
 	candidates, exists := a.cfg.resolveCandidates(req.Model)
 	if !exists {
 		return c.Status(fiber.StatusNotFound).JSON(anthropicError("not_found_error",
@@ -344,6 +349,11 @@ func (a *App) handleChatCompletions(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(openAIError("invalid_request_error", err.Error()))
 	}
+
+	if a.cfg.Gateway.Compression != "" && a.cfg.Gateway.Compression != CompressionOff {
+		compressAnthropicRequest(req, a.cfg.Gateway.Compression)
+	}
+
 	bodyBytes, err := json.Marshal(req)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(openAIError("api_error", err.Error()))
