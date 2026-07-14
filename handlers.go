@@ -157,8 +157,15 @@ func (a *App) handleMessages(c fiber.Ctx) error {
 	}
 
 	if a.cfg.Gateway.Compression != "" && a.cfg.Gateway.Compression != CompressionOff {
+		origSize := len(bodyBytes)
 		compressAnthropicRequest(&req, a.cfg.Gateway.Compression)
 		bodyBytes, _ = json.Marshal(req)
+		compSize := len(bodyBytes)
+		if a.cfg.Gateway.Debug {
+			saved := origSize - compSize
+			pct := 100 * saved / origSize
+			log.Printf("[%s] compression saved %d%% (%d → %d bytes, -%d) level=%s", name, pct, origSize, compSize, saved, a.cfg.Gateway.Compression)
+		}
 	}
 
 	candidates, exists := a.cfg.resolveCandidates(req.Model)
@@ -350,13 +357,21 @@ func (a *App) handleChatCompletions(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(openAIError("invalid_request_error", err.Error()))
 	}
 
-	if a.cfg.Gateway.Compression != "" && a.cfg.Gateway.Compression != CompressionOff {
-		compressAnthropicRequest(req, a.cfg.Gateway.Compression)
-	}
-
 	bodyBytes, err := json.Marshal(req)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(openAIError("api_error", err.Error()))
+	}
+
+	if a.cfg.Gateway.Compression != "" && a.cfg.Gateway.Compression != CompressionOff {
+		origSize := len(bodyBytes)
+		compressAnthropicRequest(req, a.cfg.Gateway.Compression)
+		bodyBytes, _ = json.Marshal(req)
+		compSize := len(bodyBytes)
+		if a.cfg.Gateway.Debug {
+			saved := origSize - compSize
+			pct := 100 * saved / origSize
+			log.Printf("[%s|openai] compression saved %d%% (%d → %d bytes, -%d) level=%s", name, pct, origSize, compSize, saved, a.cfg.Gateway.Compression)
+		}
 	}
 
 	candidates, exists := a.cfg.resolveCandidates(req.Model)
