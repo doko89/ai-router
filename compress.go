@@ -28,6 +28,17 @@ const (
 	CompressionAggressive = "aggressive"
 )
 
+func normalizeLevel(level string) string {
+	switch level {
+	case "agressive", "agresive":
+		return CompressionAggressive
+	case "standart", "standar":
+		return CompressionStandard
+	default:
+		return level
+	}
+}
+
 var (
 	ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
@@ -350,6 +361,7 @@ var (
 )
 
 func compressString(s string, level string, role string) string {
+	level = normalizeLevel(level)
 	if level == CompressionOff || s == "" {
 		return s
 	}
@@ -475,6 +487,7 @@ func truncateHeadTail(s string) string {
 }
 
 func compressAnthropicRequest(req *AnthropicRequest, level string) {
+	level = normalizeLevel(level)
 	if level == CompressionOff || req == nil {
 		return
 	}
@@ -538,6 +551,7 @@ func compressToolResultBlocks(sc *StringOrBlocks, level string) {
 // ANSI stripping, line dedup, and head/tail truncation. No natural-language
 // filler rules that could corrupt code identifiers or string literals.
 func compressToolResult(s string, level string) string {
+	level = normalizeLevel(level)
 	if level == CompressionOff || s == "" {
 		return s
 	}

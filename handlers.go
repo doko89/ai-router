@@ -157,14 +157,20 @@ func (a *App) handleMessages(c fiber.Ctx) error {
 	}
 
 	if a.cfg.Gateway.Compression != "" && a.cfg.Gateway.Compression != CompressionOff {
-		origSize := len(bodyBytes)
-		compressAnthropicRequest(&req, a.cfg.Gateway.Compression)
+		level := a.cfg.Gateway.Compression
+		var origBody []byte
+		origBody, bodyBytes = bodyBytes, nil
+		compressAnthropicRequest(&req, level)
 		bodyBytes, _ = json.Marshal(req)
-		compSize := len(bodyBytes)
-		if a.cfg.Gateway.Debug {
-			saved := origSize - compSize
-			pct := 100 * saved / origSize
-			log.Printf("[%s] compression saved %d%% (%d → %d bytes, -%d) level=%s", name, pct, origSize, compSize, saved, a.cfg.Gateway.Compression)
+		if len(bodyBytes) > len(origBody) {
+			bodyBytes = origBody
+			if a.cfg.Gateway.Debug {
+				log.Printf("[%s] compression inflated %d→%d bytes, discarded level=%s", name, len(origBody), len(bodyBytes), normalizeLevel(level))
+			}
+		} else if a.cfg.Gateway.Debug {
+			saved := len(origBody) - len(bodyBytes)
+			pct := 100 * saved / len(origBody)
+			log.Printf("[%s] compression saved %d%% (%d→%d, -%d) level=%s", name, pct, len(origBody), len(bodyBytes), saved, normalizeLevel(level))
 		}
 	}
 
@@ -363,14 +369,18 @@ func (a *App) handleChatCompletions(c fiber.Ctx) error {
 	}
 
 	if a.cfg.Gateway.Compression != "" && a.cfg.Gateway.Compression != CompressionOff {
-		origSize := len(bodyBytes)
-		compressAnthropicRequest(req, a.cfg.Gateway.Compression)
+		level := a.cfg.Gateway.Compression
+		var origBody []byte
+		origBody, bodyBytes = bodyBytes, nil
+		compressAnthropicRequest(req, level)
 		bodyBytes, _ = json.Marshal(req)
-		compSize := len(bodyBytes)
+		if len(bodyBytes) > len(origBody) {
+			bodyBytes = origBody
+		}
 		if a.cfg.Gateway.Debug {
-			saved := origSize - compSize
-			pct := 100 * saved / origSize
-			log.Printf("[%s|openai] compression saved %d%% (%d → %d bytes, -%d) level=%s", name, pct, origSize, compSize, saved, a.cfg.Gateway.Compression)
+			saved := len(origBody) - len(bodyBytes)
+			pct := 100 * saved / len(origBody)
+			log.Printf("[%s|openai] compression saved %d%% (%d→%d, -%d) level=%s", name, pct, len(origBody), len(bodyBytes), saved, normalizeLevel(level))
 		}
 	}
 
