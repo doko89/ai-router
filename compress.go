@@ -182,8 +182,6 @@ var (
 		{regexp.MustCompile(`(?i)\b(?:document|documentation)\b`), "docs", ctxAll},
 		{regexp.MustCompile(`(?i)\butilize\b`), "use", ctxAll},
 
-		// articles (aggressive removal)
-		{regexp.MustCompile(`\b(?:[Aa]n|[Aa]|[Tt]he)\s+`), "", ctxAll},
 	}
 
 	// idFillerRules: Indonesian filler words and phrases
@@ -302,9 +300,6 @@ var (
 	idUltraRules = []rule{
 		// leader phrases
 		{regexp.MustCompile(`(?i)^(?:saya akan|saya bisa|biarkan saya|kamu bisa|kita bisa|mari|mari kita)\s+`), "", ctxAll},
-
-		// particles/this/that removal
-		{regexp.MustCompile(`\b(?:itu|tersebut|ini)\s+`), "", ctxAll},
 
 		// abbreviations
 		{regexp.MustCompile(`(?i)\b(?:basis data|database)\b`), "DB", ctxAll},
@@ -516,9 +511,52 @@ func compressContent(sc *StringOrBlocks, level string, role string) {
 		case "text":
 			b.Text = compressString(b.Text, level, role)
 		case "tool_result":
-			compressContent(b.Content, level, role)
+			// tool_result = file content / command output — only apply safe
+			// compression (ANSI strip, line dedup, truncation), NOT caveman
+			// filler rules that could corrupt code identifiers.
+			compressToolResultBlocks(b.Content, level)
 		}
 	}
+}
+
+func compressToolResultBlocks(sc *StringOrBlocks, level string) {
+	if sc == nil {
+		return
+	}
+	if sc.IsString {
+		sc.Str = compressToolResult(sc.Str, level)
+		return
+	}
+	for i := range sc.Blocks {
+		if sc.Blocks[i].Type == "text" {
+			sc.Blocks[i].Text = compressToolResult(sc.Blocks[i].Text, level)
+		}
+	}
+}
+
+// compressToolResult sanitizes file content / command output — only safe ops:
+// ANSI stripping, line dedup, and head/tail truncation. No natural-language
+// filler rules that could corrupt code identifiers or string literals.
+func compressToolResult(s string, level string) string {
+	if level == CompressionOff || s == "" {
+		return s
+	}
+
+	orig := s
+	s = stripANSI(s)
+
+	if level == CompressionStandard || level == CompressionAggressive {
+		s = dedupLines(s)
+	}
+
+	if level == CompressionAggressive {
+		s = truncateHeadTail(s)
+	}
+
+	if len(s) > len(orig) {
+		return orig
+	}
+	return s
 }
 
 func intToString(n int) string {
