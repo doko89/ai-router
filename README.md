@@ -22,6 +22,7 @@ rewritten in Go as a configurable gateway.
 - ✅ **Rate-limit cooldown** — on `429`, skip the provider for a configurable window (default 10 min); `Retry-After` honored
 - ✅ **`/v1/models`** — lists your model aggregations
 - ✅ **Token counting** — `/v1/messages/count_tokens` (tiktoken)
+- ✅ **Prompt compression** — Caveman + RTK-style compression saves 15–50%+ tokens before upstream dispatch (levels: `off`, `lite`, `standard`, `aggressive`)
 - ✅ **YAML config**
 
 ## 📦 Build
@@ -46,6 +47,7 @@ gateway:
   port: 8081
   debug: true
   rate_limit_cooldown: 600   # seconds; global default when a provider omits its own (0 = disabled)
+  compression: standard      # off | lite | standard | aggressive (optional, saves tokens)
 
 client_keys:              # callers must present one of these keys
   - key: ak-xxxxxxxx
@@ -131,6 +133,7 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL="flash"
 | `transform.go`           | `chat/completions` request/response transforms       |
 | `transform_responses.go` | `responses` request/response transforms              |
 | `stream.go`              | SSE streaming translation                            |
+| `compress.go`            | prompt compression (Caveman + RTK-style, EN + ID)    |
 | `token.go`               | tiktoken token counting                              |
 
 ## 📄 License
