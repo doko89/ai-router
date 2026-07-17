@@ -3,24 +3,25 @@
 ![AI Router Logo](Anthropic-Adapter.png "AI Router")
 
 A **multi-provider LLM gateway** written in Go (Fiber v3). It accepts **both
-Anthropic- and OpenAI-compatible** inbound requests (`/v1/messages` and
-`/v1/chat/completions`) and routes them to any number of upstream providers
+Anthropic- and OpenAI-compatible** inbound requests — with **separate path
+prefixes for each format** — and routes them to any number of upstream providers
 (OpenAI-compatible, OpenAI Responses, or Anthropic-compatible), translating
 message formats on the fly. Originally a Python/FastAPI single-provider adapter;
 rewritten in Go as a configurable gateway.
 
 ## 🎯 Features
 
-- ✅ **Dual inbound API** — Anthropic (`/v1/messages`) **and** OpenAI (`/v1/chat/completions`)
+- ✅ **Dual-path API** — OpenAI at `/v1/*`, Anthropic at `/v1/anthropic/*`
+- ✅ **Path-appropriate model list** — `/v1/models` returns OpenAI format, `/v1/anthropic/v1/models` returns Anthropic format
 - ✅ **Multi-provider** — register many upstreams (`openai`, `openai-responses`, `anthropic`)
 - ✅ **Model aggregation** — virtual model names routed by strategy: `failover`, `round_robin`, `weighted`
 - ✅ **Automatic failover** — every strategy falls back to remaining targets on error
 - ✅ **Format translation** — Anthropic ⇄ OpenAI (chat/completions & responses); Anthropic passthrough
 - ✅ **Effort / reasoning forwarding** — `output_config.effort` / `thinking.effort` (Anthropic) ⇄ `reasoning_effort` / `reasoning.effort` (OpenAI); provider `reasoning_tokens` passed back to the client
-- ✅ **Streaming** — SSE with correct Anthropic event framing
+- ✅ **Accurate streaming usage** — `output_tokens` in `message_delta` reflects real upstream usage (no hardcoded values)
+- ✅ **Model metadata** — `context_window` / `max_output` per aggregation, exposed via both model-list endpoints
 - ✅ **Client auth** — gateway-level API keys (`Authorization: Bearer` or `x-api-key`)
 - ✅ **Rate-limit cooldown** — on `429`, skip the provider for a configurable window (default 10 min); `Retry-After` honored
-- ✅ **`/v1/models`** — lists your model aggregations
 - ✅ **Token counting** — `/v1/messages/count_tokens` (tiktoken)
 - ✅ **Prompt compression** — Caveman + RTK-style compression saves 15–50%+ tokens before upstream dispatch (levels: `off`, `lite`, `standard`, `aggressive`)
 - ✅ **YAML config**
@@ -79,8 +80,9 @@ model_aggregations:
 | `anthropic`        | `{base_url}/messages`           | passthrough (no translation)   |
 
 All three dialects are reachable as **both inbound and outbound**: the gateway
-accepts Anthropic (`/v1/messages`) and OpenAI (`/v1/chat/completions`) requests
-and translates them to whichever upstream dialect a target provider uses.
+accepts Anthropic-format requests at `POST /v1/anthropic/v1/messages` and
+OpenAI-format requests at `POST /v1/chat/completions`, and translates them
+to whichever upstream dialect a target provider uses.
 
 Disabled providers, and targets referencing unknown providers, are skipped when
 building the candidate list. If `client_keys` is empty, auth is disabled.
@@ -93,31 +95,39 @@ building the candidate list. If `client_keys` is empty, auth is disabled.
 
 ## 🛠️ API
 
-### `POST /v1/messages`
-Anthropic `v1/messages` body. Set `model` to an **aggregation name**. Supports
-`stream: true`. Auth required.
+### OpenAI — `/v1/*`
 
-### `POST /v1/chat/completions`
-OpenAI `chat/completions` body, also routed via an **aggregation name** in
-`model`. Supports `stream: true`, `tool_calls`, and `reasoning_effort`. Auth
-required.
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/chat/completions` | OpenAI `chat/completions` body. `model` = aggregation name. Supports `stream`, `tool_calls`, `reasoning_effort`. |
+| `GET` | `/v1/models` | Lists aggregations in **OpenAI format** (`object: "model"`, `created`, `owned_by`). |
 
-### `POST /v1/messages/count_tokens`
-Returns `{ "input_tokens": <n> }`.
+### Anthropic — `/v1/anthropic/*`
 
-### `GET /v1/models`
-Lists model aggregations in OpenAI models format (`object: "model"`,
-`owned_by: "ai-router"`).
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/anthropic/v1/messages` | Anthropic `messages` body. `model` = aggregation name. Supports `stream: true`. |
+| `POST` | `/v1/anthropic/v1/messages/count_tokens` | Returns `{ "input_tokens": <n> }`. |
+| `GET` | `/v1/anthropic/v1/models` | Lists aggregations in **Anthropic format** (`type: "model"`, `created_at`, `display_name`). |
+
+Both model-list endpoints include `context_window` and `max_output` per model when configured.
 
 ## 🤝 Using with Claude Code
 
 ```bash
-export ANTHROPIC_BASE_URL="http://localhost:8081"
+export ANTHROPIC_BASE_URL="http://localhost:8081/v1/anthropic"
 export ANTHROPIC_AUTH_TOKEN="ak-xxxxxxxx"     # a gateway client key
 export ANTHROPIC_API_KEY=""
 export ANTHROPIC_DEFAULT_SONNET_MODEL="flash" # an aggregation name
 export ANTHROPIC_DEFAULT_OPUS_MODEL="pro"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="flash"
+```
+
+For OpenAI-compatible clients (OpenCode, any OpenAI SDK):
+
+```bash
+export OPENAI_BASE_URL="http://localhost:8081/v1"
+export OPENAI_API_KEY="ak-xxxxxxxx"
 ```
 
 ## 🔧 Architecture

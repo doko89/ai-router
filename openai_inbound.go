@@ -387,14 +387,24 @@ func writeOpenAISSE(w *bufio.Writer, chunk map[string]any) {
 }
 
 func streamAnthropicToOpenAI(w *bufio.Writer, body io.Reader, model string) {
+	var promptTokens, completionTokens int
+
 	emit := func(delta map[string]any, finish string) {
-		writeOpenAISSE(w, map[string]any{
+		chunk := map[string]any{
 			"id":      "chatcmpl-" + uuid.New().String(),
 			"object":  "chat.completion.chunk",
 			"created": time.Now().Unix(),
 			"model":   model,
 			"choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": finish}},
-		})
+		}
+		if finish != "" && (promptTokens > 0 || completionTokens > 0) {
+			chunk["usage"] = map[string]any{
+				"prompt_tokens":     promptTokens,
+				"completion_tokens": completionTokens,
+				"total_tokens":      promptTokens + completionTokens,
+			}
+		}
+		writeOpenAISSE(w, chunk)
 	}
 
 	sc := newScanner(body)
@@ -420,6 +430,13 @@ func streamAnthropicToOpenAI(w *bufio.Writer, body io.Reader, model string) {
 			if !emittedRole {
 				emit(map[string]any{"role": "assistant"}, "")
 				emittedRole = true
+			}
+			if msg, ok := ev["message"].(map[string]any); ok {
+				if u, ok := msg["usage"].(map[string]any); ok {
+					if pt, ok := u["input_tokens"]; ok {
+						promptTokens = int(toFloat(pt))
+					}
+				}
 			}
 		case "content_block_start":
 			idx := int(toFloat(ev["index"]))
@@ -458,6 +475,11 @@ func streamAnthropicToOpenAI(w *bufio.Writer, body io.Reader, model string) {
 				}}}, "")
 			}
 		case "message_delta":
+			if u, ok := ev["usage"].(map[string]any); ok {
+				if ct, ok := u["output_tokens"]; ok {
+					completionTokens = int(toFloat(ct))
+				}
+			}
 			fr := "stop"
 			switch ev["stop_reason"] {
 			case "tool_use":
@@ -472,14 +494,24 @@ func streamAnthropicToOpenAI(w *bufio.Writer, body io.Reader, model string) {
 }
 
 func streamV1ResponsesToOpenAI(w *bufio.Writer, body io.Reader, model string) {
+	var promptTokens, completionTokens int
+
 	emit := func(delta map[string]any, finish string) {
-		writeOpenAISSE(w, map[string]any{
+		chunk := map[string]any{
 			"id":      "chatcmpl-" + uuid.New().String(),
 			"object":  "chat.completion.chunk",
 			"created": time.Now().Unix(),
 			"model":   model,
 			"choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": finish}},
-		})
+		}
+		if finish != "" && (promptTokens > 0 || completionTokens > 0) {
+			chunk["usage"] = map[string]any{
+				"prompt_tokens":     promptTokens,
+				"completion_tokens": completionTokens,
+				"total_tokens":      promptTokens + completionTokens,
+			}
+		}
+		writeOpenAISSE(w, chunk)
 	}
 
 	sc := newScanner(body)
@@ -552,8 +584,16 @@ func streamV1ResponsesToOpenAI(w *bufio.Writer, body io.Reader, model string) {
 				}
 			}
 		case "response.completed":
-			fr := "stop"
 			if resp, ok := chunk["response"].(map[string]any); ok {
+				if u, ok := resp["usage"].(map[string]any); ok {
+					if pt, ok := u["input_tokens"]; ok {
+						promptTokens = int(toFloat(pt))
+					}
+					if ct, ok := u["output_tokens"]; ok {
+						completionTokens = int(toFloat(ct))
+					}
+				}
+				fr := "stop"
 				if out, ok := resp["output"].([]any); ok {
 					for _, it := range out {
 						if m, ok := it.(map[string]any); ok {
@@ -564,8 +604,8 @@ func streamV1ResponsesToOpenAI(w *bufio.Writer, body io.Reader, model string) {
 						}
 					}
 				}
+				emit(map[string]any{}, fr)
 			}
-			emit(map[string]any{}, fr)
 		}
 	}
 	writeOpenAISSE(w, map[string]any{"data": "[DONE]"})

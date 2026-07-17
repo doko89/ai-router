@@ -517,11 +517,43 @@ func (a *App) handleCountTokens(c fiber.Ctx) error {
 	return c.JSON(map[string]any{"input_tokens": tokenCount})
 }
 
-// handleListModels implements GET /v1/models, listing model aggregations.
-func (a *App) handleListModels(c fiber.Ctx) error {
+// handleListModelsOpenAI implements GET /v1/models in OpenAI format.
+func (a *App) handleListModelsOpenAI(c fiber.Ctx) error {
 	if _, ok := a.authenticate(c); !ok {
-		return c.Status(fiber.StatusUnauthorized).JSON(
-			anthropicError("authentication_error", "Invalid or missing client API key"))
+		return c.Status(fiber.StatusUnauthorized).JSON(openAIError("authentication_error", "Invalid or missing client API key"))
+	}
+
+	created := time.Now().Unix()
+	names := a.cfg.aggregationNames()
+	data := make([]map[string]any, 0, len(names))
+	for _, n := range names {
+		entry := map[string]any{
+			"id":        n,
+			"object":    "model",
+			"created":   created,
+			"owned_by":  "ai-router",
+		}
+		if meta, ok := a.cfg.aggregationMetadata(n); ok {
+			if meta.ContextWindow > 0 {
+				entry["context_window"] = meta.ContextWindow
+			}
+			if meta.MaxOutput > 0 {
+				entry["max_output"] = meta.MaxOutput
+			}
+		}
+		data = append(data, entry)
+	}
+
+	return c.JSON(map[string]any{
+		"object": "list",
+		"data":   data,
+	})
+}
+
+// handleListModelsAnthropic implements GET /v1/models in Anthropic format.
+func (a *App) handleListModelsAnthropic(c fiber.Ctx) error {
+	if _, ok := a.authenticate(c); !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(anthropicError("authentication_error", "Invalid or missing client API key"))
 	}
 
 	created := time.Now().UTC().Format(time.RFC3339)
@@ -529,12 +561,10 @@ func (a *App) handleListModels(c fiber.Ctx) error {
 	data := make([]map[string]any, 0, len(names))
 	for _, n := range names {
 		entry := map[string]any{
-			"id":           n,
-			"object":       "model",
 			"type":         "model",
+			"id":           n,
 			"display_name": n,
 			"created_at":   created,
-			"owned_by":     "ai-router",
 		}
 		if meta, ok := a.cfg.aggregationMetadata(n); ok {
 			if meta.ContextWindow > 0 {
@@ -548,7 +578,6 @@ func (a *App) handleListModels(c fiber.Ctx) error {
 	}
 
 	resp := map[string]any{
-		"object":   "list",
 		"data":     data,
 		"has_more": false,
 	}

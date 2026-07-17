@@ -42,10 +42,13 @@ func buildApp(cfg *Config) *fiber.App {
 
 	h := NewApp(cfg)
 
-	app.Post("/v1/messages", h.handleMessages)
-	app.Post("/v1/messages/count_tokens", h.handleCountTokens)
 	app.Post("/v1/chat/completions", h.handleChatCompletions)
-	app.Get("/v1/models", h.handleListModels)
+	app.Get("/v1/models", h.handleListModelsOpenAI)
+
+	anthropic := app.Group("/v1/anthropic")
+	anthropic.Post("/v1/messages", h.handleMessages)
+	anthropic.Post("/v1/messages/count_tokens", h.handleCountTokens)
+	anthropic.Get("/v1/models", h.handleListModelsAnthropic)
 
 	return app
 }

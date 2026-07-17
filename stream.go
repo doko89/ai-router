@@ -32,11 +32,14 @@ func newScanner(r io.Reader) *bufio.Scanner {
 func streamOpenAIToAnthropic(w *bufio.Writer, body io.Reader) {
 	msgID := "msg_" + uuid.New().String()
 
+	var completionTokens int
+	modelName := "proxy"
+
 	writeSSE(w, "message_start", map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
 			"id": msgID, "type": "message", "role": "assistant",
-			"content": []any{}, "model": "proxy",
+			"content": []any{}, "model": modelName,
 			"stop_reason": nil, "stop_sequence": nil,
 			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
 		},
@@ -62,6 +65,18 @@ func streamOpenAIToAnthropic(w *bufio.Writer, body io.Reader) {
 		if err := json.Unmarshal([]byte(line[6:]), &chunk); err != nil {
 			log.Printf("Streaming Error: %v", err)
 			continue
+		}
+
+		// Track model name from first chunk that has it.
+		if m, ok := chunk["model"].(string); ok && m != "" && modelName == "proxy" {
+			modelName = m
+		}
+
+		// Track usage from any chunk (OpenAI sends it in the final chunk).
+		if u, ok := chunk["usage"].(map[string]any); ok {
+			if ct, ok := u["completion_tokens"]; ok {
+				completionTokens = int(toFloat(ct))
+			}
 		}
 
 		choices, _ := chunk["choices"].([]any)
@@ -130,13 +145,15 @@ func streamOpenAIToAnthropic(w *bufio.Writer, body io.Reader) {
 			writeSSE(w, "message_delta", map[string]any{
 				"type":  "message_delta",
 				"delta": map[string]any{"stop_reason": anthropicReason, "stop_sequence": nil},
-				"usage": map[string]any{"output_tokens": 10},
+				"usage": map[string]any{"output_tokens": completionTokens},
 			})
 		}
 	}
 
 	writeSSE(w, "message_stop", map[string]any{"type": "message_stop"})
 }
+
+// toFloat coerces a JSON-decoded numeric value to float64.
 
 // streamV1ResponsesToAnthropic transforms an OpenAI v1/responses SSE stream into
 // the Anthropic v1/messages event stream.
@@ -174,13 +191,21 @@ func streamV1ResponsesToAnthropic(w *bufio.Writer, body io.Reader) {
 		switch eventType {
 		case "response.created":
 			if !messageStarted {
+				inputTokens := 0
+				if resp, ok := chunk["response"].(map[string]any); ok {
+					if u, ok := resp["usage"].(map[string]any); ok {
+						if it, ok := u["input_tokens"]; ok {
+							inputTokens = int(toFloat(it))
+						}
+					}
+				}
 				writeSSE(w, "message_start", map[string]any{
 					"type": "message_start",
 					"message": map[string]any{
 						"id": msgID, "type": "message", "role": "assistant",
 						"content": []any{}, "model": "proxy",
 						"stop_reason": nil, "stop_sequence": nil,
-						"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
+						"usage": map[string]any{"input_tokens": inputTokens, "output_tokens": 0},
 					},
 				})
 				messageStarted = true
