@@ -225,6 +225,9 @@ func (a *App) handleMessages(c fiber.Ctx) error {
 			continue
 		}
 
+		if a.cfg.Gateway.Debug {
+			log.Printf("[%s] → provider=%s model=%s compatible=%s stream=%v", name, tgt.Provider.Name, tgt.Model, tgt.Provider.Compatible, req.Stream)
+		}
 		if req.Stream {
 			return a.streamResponse(c, tgt.Provider.Compatible, resp)
 		}
@@ -435,6 +438,9 @@ func (a *App) handleChatCompletions(c fiber.Ctx) error {
 			continue
 		}
 
+		if a.cfg.Gateway.Debug {
+			log.Printf("[%s|openai] → provider=%s model=%s compatible=%s stream=%v", name, tgt.Provider.Name, tgt.Model, tgt.Provider.Compatible, req.Stream)
+		}
 		if req.Stream {
 			return a.streamResponseOpenAI(c, tgt.Provider.Compatible, resp, req.Model)
 		}
