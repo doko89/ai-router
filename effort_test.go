@@ -67,7 +67,7 @@ func TestEffortForwardingOpenAI(t *testing.T) {
 	}
 
 	// Anthropic inbound output_config.effort -> reasoning_effort
-	doReq(t, app, "/v1/messages", "Bearer test",
+	doReq(t, app, "/v1/anthropic/v1/messages", "Bearer test",
 		`{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"low"}}`)
 	var m2 map[string]any
 	json.Unmarshal([]byte(captured[1]), &m2)
@@ -76,7 +76,7 @@ func TestEffortForwardingOpenAI(t *testing.T) {
 	}
 
 	// Anthropic inbound thinking.effort -> reasoning_effort
-	doReq(t, app, "/v1/messages", "Bearer test",
+	doReq(t, app, "/v1/anthropic/v1/messages", "Bearer test",
 		`{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive","effort":"medium"}}`)
 	var m3 map[string]any
 	json.Unmarshal([]byte(captured[2]), &m3)

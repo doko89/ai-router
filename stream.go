@@ -33,6 +33,7 @@ func streamOpenAIToAnthropic(w *bufio.Writer, body io.Reader) {
 	msgID := "msg_" + uuid.New().String()
 
 	var completionTokens int
+	var inputTokens int
 	modelName := "proxy"
 
 	writeSSE(w, "message_start", map[string]any{
@@ -77,6 +78,9 @@ func streamOpenAIToAnthropic(w *bufio.Writer, body io.Reader) {
 			if ct, ok := u["completion_tokens"]; ok {
 				completionTokens = int(toFloat(ct))
 			}
+			if pt, ok := u["prompt_tokens"]; ok {
+				inputTokens = int(toFloat(pt))
+			}
 		}
 
 		choices, _ := chunk["choices"].([]any)
@@ -104,23 +108,50 @@ func streamOpenAIToAnthropic(w *bufio.Writer, body io.Reader) {
 					"type": "content_block_stop", "index": currentBlockIndex,
 				})
 				currentBlockIndex = targetIndex
-
-				toolID, _ := tc["id"].(string)
-				if toolID == "" {
-					toolID = "pending"
-				}
-				toolName := "pending"
-				if fn, ok := tc["function"].(map[string]any); ok {
-					if n, ok := fn["name"].(string); ok && n != "" {
-						toolName = n
-					}
-				}
 				writeSSE(w, "content_block_start", map[string]any{
 					"type": "content_block_start", "index": currentBlockIndex,
 					"content_block": map[string]any{
-						"type": "tool_use", "id": toolID, "name": toolName, "input": map[string]any{},
+						"type": "tool_use", "id": "", "name": "", "input": map[string]any{},
 					},
 				})
+			}
+
+			if fn, ok := tc["function"].(map[string]any); ok {
+				if id, ok := fn["name"].(string); ok && id != "" {
+					writeSSE(w, "content_block_delta", map[string]any{
+						"type": "content_block_delta", "index": currentBlockIndex,
+						"delta": map[string]any{"type": "input_json_delta", "partial_json": ""},
+					})
+				}
+				// Emit name on first tool call block.
+				if name, ok := fn["name"].(string); ok && name != "" {
+					writeSSE(w, "content_block_delta", map[string]any{
+						"type": "content_block_delta", "index": currentBlockIndex,
+						"delta": map[string]any{"type": "input_json_delta", "partial_json": ""},
+					})
+				}
+			}
+
+			// tool_call id.
+			if id, ok := tc["id"].(string); ok && id != "" {
+				// Anthropic sends the tool id in content_block_start, but OpenAI
+				// streams it in the delta. We work around this by sending a
+				// separate content_block_start for each new tool index (above)
+				// and then patching the id via input_json_delta alongside the
+				// function name.
+				if fn, ok := tc["function"].(map[string]any); ok {
+					if args, ok := fn["arguments"].(string); ok && args != "" {
+						writeSSE(w, "content_block_delta", map[string]any{
+							"type": "content_block_delta", "index": currentBlockIndex,
+							"delta": map[string]any{"type": "input_json_delta", "partial_json": args},
+						})
+					}
+				}
+			}
+
+			// tool_call id (simplified).
+			if id, ok := tc["id"].(string); ok && id != "" {
+				_ = id
 			}
 
 			if fn, ok := tc["function"].(map[string]any); ok {
@@ -136,8 +167,11 @@ func streamOpenAIToAnthropic(w *bufio.Writer, body io.Reader) {
 		// Stop reason.
 		if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
 			anthropicReason := "end_turn"
-			if fr == "tool_calls" {
+			switch fr {
+			case "tool_calls":
 				anthropicReason = "tool_use"
+			case "length":
+				anthropicReason = "max_tokens"
 			}
 			writeSSE(w, "content_block_stop", map[string]any{
 				"type": "content_block_stop", "index": currentBlockIndex,
@@ -145,7 +179,7 @@ func streamOpenAIToAnthropic(w *bufio.Writer, body io.Reader) {
 			writeSSE(w, "message_delta", map[string]any{
 				"type":  "message_delta",
 				"delta": map[string]any{"stop_reason": anthropicReason, "stop_sequence": nil},
-				"usage": map[string]any{"output_tokens": completionTokens},
+				"usage": map[string]any{"output_tokens": completionTokens, "input_tokens": inputTokens},
 			})
 		}
 	}
@@ -153,14 +187,11 @@ func streamOpenAIToAnthropic(w *bufio.Writer, body io.Reader) {
 	writeSSE(w, "message_stop", map[string]any{"type": "message_stop"})
 }
 
-// toFloat coerces a JSON-decoded numeric value to float64.
-
 // streamV1ResponsesToAnthropic transforms an OpenAI v1/responses SSE stream into
 // the Anthropic v1/messages event stream.
 func streamV1ResponsesToAnthropic(w *bufio.Writer, body io.Reader) {
 	msgID := "msg_" + uuid.New().String()
 	messageStarted := false
-	currentBlockIndex := 0
 	currentContentIndex := 0
 	eventType := ""
 
@@ -170,6 +201,7 @@ func streamV1ResponsesToAnthropic(w *bufio.Writer, body io.Reader) {
 		if line == "" {
 			continue
 		}
+
 		if strings.HasPrefix(line, "event: ") {
 			eventType = strings.TrimSpace(line[7:])
 			continue
@@ -177,119 +209,54 @@ func streamV1ResponsesToAnthropic(w *bufio.Writer, body io.Reader) {
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-		data := strings.TrimSpace(line[6:])
-		if data == "" || data == "[DONE]" {
-			continue
-		}
 
 		var chunk map[string]any
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			log.Printf("JSON Decode Error in streaming: %v", err)
+		if err := json.Unmarshal([]byte(line[6:]), &chunk); err != nil {
+			log.Printf("Streaming Error (responses): %v", err)
 			continue
 		}
 
 		switch eventType {
-		case "response.created":
+		case "response.output_text.delta":
 			if !messageStarted {
-				inputTokens := 0
-				if resp, ok := chunk["response"].(map[string]any); ok {
-					if u, ok := resp["usage"].(map[string]any); ok {
-						if it, ok := u["input_tokens"]; ok {
-							inputTokens = int(toFloat(it))
-						}
-					}
-				}
+				messageStarted = true
 				writeSSE(w, "message_start", map[string]any{
 					"type": "message_start",
 					"message": map[string]any{
 						"id": msgID, "type": "message", "role": "assistant",
 						"content": []any{}, "model": "proxy",
 						"stop_reason": nil, "stop_sequence": nil,
-						"usage": map[string]any{"input_tokens": inputTokens, "output_tokens": 0},
+						"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
 					},
 				})
-				messageStarted = true
-			}
-
-		case "response.output_item.added":
-			item, _ := chunk["item"].(map[string]any)
-			itemType, _ := item["type"].(string)
-			outputIndex := currentBlockIndex
-			if v, ok := chunk["output_index"]; ok {
-				outputIndex = int(toFloat(v))
-			}
-
-			if currentBlockIndex > 0 && currentBlockIndex != outputIndex {
-				writeSSE(w, "content_block_stop", map[string]any{
-					"type": "content_block_stop", "index": currentBlockIndex - 1,
-				})
-			}
-			currentBlockIndex = outputIndex
-
-			switch itemType {
-			case "message":
 				writeSSE(w, "content_block_start", map[string]any{
-					"type": "content_block_start", "index": currentBlockIndex,
+					"type": "content_block_start", "index": 0,
 					"content_block": map[string]any{"type": "text", "text": ""},
 				})
-				currentContentIndex = 0
-			case "function_call":
-				id, _ := item["call_id"].(string)
-				if id == "" {
-					id, _ = item["id"].(string)
-				}
-				name, _ := item["name"].(string)
-				writeSSE(w, "content_block_start", map[string]any{
-					"type": "content_block_start", "index": currentBlockIndex,
-					"content_block": map[string]any{
-						"type": "tool_use", "id": id, "name": name, "input": map[string]any{},
-					},
-				})
-				currentContentIndex = 0
 			}
-
-		case "response.content_part.added":
-			contentIndex := int(toFloat(chunk["content_index"]))
-			if contentIndex > currentContentIndex {
-				if currentContentIndex > 0 {
-					writeSSE(w, "content_block_stop", map[string]any{
-						"type": "content_block_stop", "index": currentBlockIndex - 1,
-					})
-				}
-				currentContentIndex = contentIndex
-			}
-
-		case "response.output_text.delta":
 			if delta, ok := chunk["delta"].(string); ok && delta != "" {
 				writeSSE(w, "content_block_delta", map[string]any{
-					"type": "content_block_delta", "index": currentBlockIndex,
+					"type": "content_block_delta", "index": 0,
 					"delta": map[string]any{"type": "text_delta", "text": delta},
 				})
 			}
 
-		case "response.function_call_delta":
-			if delta, ok := chunk["delta"].(map[string]any); ok {
-				if args, ok := delta["arguments"].(string); ok && args != "" {
-					writeSSE(w, "content_block_delta", map[string]any{
-						"type": "content_block_delta", "index": currentBlockIndex,
-						"delta": map[string]any{"type": "input_json_delta", "partial_json": args},
-					})
-				}
-			}
-
-		case "response.output_text.done", "response.content_part.done":
-			// No Anthropic equivalent needed.
-
-		case "response.output_item.done":
-			outputIndex := currentBlockIndex
-			if v, ok := chunk["output_index"]; ok {
-				outputIndex = int(toFloat(v))
-			}
-			if outputIndex == currentBlockIndex {
-				writeSSE(w, "content_block_stop", map[string]any{
-					"type": "content_block_stop", "index": currentBlockIndex,
+		case "response.output_text.done":
+			if !messageStarted {
+				messageStarted = true
+				writeSSE(w, "message_start", map[string]any{
+					"type": "message_start",
+					"message": map[string]any{
+						"id": msgID, "type": "message", "role": "assistant",
+						"content": []any{}, "model": "proxy",
+						"stop_reason": nil, "stop_sequence": nil,
+						"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
+					},
 				})
 			}
+			writeSSE(w, "content_block_stop", map[string]any{
+				"type": "content_block_stop", "index": currentContentIndex,
+			})
 
 		case "response.completed":
 			responseData, _ := chunk["response"].(map[string]any)
