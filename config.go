@@ -42,21 +42,27 @@ type Provider struct {
 	BaseURL           string     `yaml:"base_url"`
 	APIKey            string     `yaml:"api_key"`
 	RateLimitCooldown int        `yaml:"rate_limit_cooldown"` // per-provider override; 0 = use gateway default
+	ContextWindow     int        `yaml:"context_window"`      // max input tokens; 0 = unknown
+	MaxOutput         int        `yaml:"max_output"`          // max output tokens; 0 = unknown
 }
 
 // AggModel is one routable target inside an aggregation.
 type AggModel struct {
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
-	Weight   int    `yaml:"weight"`
+	Provider      string `yaml:"provider"`
+	Model         string `yaml:"model"`
+	Weight        int    `yaml:"weight"`
+	ContextWindow int    `yaml:"context_window"` // per-model override; 0 = inherit from provider
+	MaxOutput     int    `yaml:"max_output"`      // per-model override; 0 = inherit from provider
 }
 
 // ModelAggregation maps a virtual model name to one or more provider targets
 // selected via a routing strategy.
 type ModelAggregation struct {
-	Name     string     `yaml:"name"`
-	Strategy string     `yaml:"strategy"`
-	Models   []AggModel `yaml:"models"`
+	Name          string     `yaml:"name"`
+	Strategy      string     `yaml:"strategy"`
+	Models        []AggModel `yaml:"models"`
+	ContextWindow int        `yaml:"context_window"` // override for entire aggregation; 0 = resolve from models
+	MaxOutput     int        `yaml:"max_output"`      // override for entire aggregation; 0 = resolve from models
 
 	rr atomic.Uint64 // round-robin counter
 }
@@ -155,6 +161,62 @@ func (p *Provider) endpoint() string {
 	default:
 		return base + "/chat/completions"
 	}
+}
+
+// EffectiveMetadata holds resolved context window and max output for an aggregation.
+type EffectiveMetadata struct {
+	ContextWindow int
+	MaxOutput     int
+}
+
+// aggregationMetadata computes the effective (context_window, max_output) for an
+// aggregation. Hierarchy (first wins):
+//  1. aggregation-level override (ModelAggregation.ContextWindow / MaxOutput)
+//  2. min of all valid model candidates (each: AggModel override → Provider value → 0)
+//  3. 0 (unknown) if no value can be determined
+func (c *Config) aggregationMetadata(name string) (EffectiveMetadata, bool) {
+	agg, ok := c.aggByName[name]
+	if !ok {
+		return EffectiveMetadata{}, false
+	}
+
+	// Aggregation-level override — strongest.
+	if agg.ContextWindow > 0 || agg.MaxOutput > 0 {
+		return EffectiveMetadata{ContextWindow: agg.ContextWindow, MaxOutput: agg.MaxOutput}, true
+	}
+
+	// Otherwise compute min across all enabled models.
+	minCtx := -1
+	minOut := -1
+	for _, m := range agg.Models {
+		p, ok := c.providerByName[m.Provider]
+		if !ok || !p.Enabled {
+			continue
+		}
+		ctx := m.ContextWindow
+		if ctx <= 0 {
+			ctx = p.ContextWindow
+		}
+		out := m.MaxOutput
+		if out <= 0 {
+			out = p.MaxOutput
+		}
+		if ctx > 0 && (minCtx < 0 || ctx < minCtx) {
+			minCtx = ctx
+		}
+		if out > 0 && (minOut < 0 || out < minOut) {
+			minOut = out
+		}
+	}
+
+	meta := EffectiveMetadata{}
+	if minCtx > 0 {
+		meta.ContextWindow = minCtx
+	}
+	if minOut > 0 {
+		meta.MaxOutput = minOut
+	}
+	return meta, true
 }
 
 // authClient returns (client name, true) if the given key is authorized. When

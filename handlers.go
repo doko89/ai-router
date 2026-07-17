@@ -528,14 +528,23 @@ func (a *App) handleListModels(c fiber.Ctx) error {
 	names := a.cfg.aggregationNames()
 	data := make([]map[string]any, 0, len(names))
 	for _, n := range names {
-		data = append(data, map[string]any{
-			"id":            n,
-			"object":        "model",
-			"type":          "model",
-			"display_name":  n,
-			"created_at":    created,
-			"owned_by":      "ai-router",
-		})
+		entry := map[string]any{
+			"id":           n,
+			"object":       "model",
+			"type":         "model",
+			"display_name": n,
+			"created_at":   created,
+			"owned_by":     "ai-router",
+		}
+		if meta, ok := a.cfg.aggregationMetadata(n); ok {
+			if meta.ContextWindow > 0 {
+				entry["context_window"] = meta.ContextWindow
+			}
+			if meta.MaxOutput > 0 {
+				entry["max_output"] = meta.MaxOutput
+			}
+		}
+		data = append(data, entry)
 	}
 
 	resp := map[string]any{

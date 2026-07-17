@@ -9,6 +9,9 @@
 # Local config (contains secrets)
 config.yaml
 
+# Planning / agent state
+.omo/
+
 # Env
 .env
 .env.local

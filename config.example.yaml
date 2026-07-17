@@ -17,7 +17,7 @@ gateway:
 # Caller-facing keys. Send as `Authorization: Bearer <key>` or `x-api-key: <key>`.
 # Leave empty to disable auth (allow all).
 client_keys:
-  - key: ak-622b8bf3c894092ccc8999c9c4a6f6b550392233b23dc922
+  - key: ak-your-client-key
     name: dev
 
 # Upstream providers. `compatible` is one of:
@@ -30,32 +30,46 @@ providers:
     compatible: openai
     base_url: https://opencode.ai/zen/v1
     api_key: sk-your-opencode-key
+    # context_window: 200000          # optional; 0 = unknown
+    # max_output: 16000               # optional; 0 = unknown
 
   - name: mimo
     enabled: false
     compatible: openai
     base_url: https://token-plan-sgp.xiaomimimo.com/v1
     api_key: tp-your-mimo-key
-    # rate_limit_cooldown: 60        # optional per-provider override (seconds)
+    # rate_limit_cooldown: 60         # optional per-provider override (seconds)
+    # context_window: 1000000
+    # max_output: 128000
 
 # Virtual models exposed via /v1/models. Requests using these names are routed
 # to a concrete provider+model according to `strategy`:
 #   failover     -> try in declared order
 #   round_robin  -> rotate across targets (with failover to the rest)
 #   weighted     -> weighted-random pick (with failover to the rest)
+#
+# Effective context_window / max_output for an aggregation:
+#   1. aggregation-level override (set here) → use it
+#   2. min of all model candidates (AggModel → Provider → 0)
+#   3. 0 (unknown) if nothing is configured
 model_aggregations:
   - name: flash
     strategy: round_robin
+    # context_window: 180000          # optional aggregation-level override
+    # max_output: 16000
     models:
       - provider: oc1
         model: deepseek-v4-flash-free
         weight: 50
+        # context_window: 200000      # optional per-model override
       - provider: oc4
         model: deepseek-v4-flash-free
         weight: 50
 
   - name: pro
     strategy: weighted
+    # context_window: 180000          # override: when models have different
+    # max_output: 16000               # context windows, set the safe minimum here
     models:
       - provider: mimo
         model: mimo-v2.5-pro
