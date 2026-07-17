@@ -371,9 +371,11 @@ func transformAnthropicToOpenAIMap(resp map[string]any, model string) map[string
 		"choices": []map[string]any{{
 			"index":         0,
 			"message":       msg,
+			"logprobs":      nil,
 			"finish_reason": fr,
 		}},
-		"usage": usageOut,
+		"usage":              usageOut,
+		"system_fingerprint": "fp_ai_router",
 	}
 }
 
@@ -395,7 +397,7 @@ func streamAnthropicToOpenAI(w *bufio.Writer, body io.Reader, model string) {
 			"object":  "chat.completion.chunk",
 			"created": time.Now().Unix(),
 			"model":   model,
-			"choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": finish}},
+			"choices": []map[string]any{{"index": 0, "delta": delta, "logprobs": nil, "finish_reason": finish}},
 		}
 		if finish != "" && (promptTokens > 0 || completionTokens > 0) {
 			chunk["usage"] = map[string]any{
@@ -502,7 +504,7 @@ func streamV1ResponsesToOpenAI(w *bufio.Writer, body io.Reader, model string) {
 			"object":  "chat.completion.chunk",
 			"created": time.Now().Unix(),
 			"model":   model,
-			"choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": finish}},
+			"choices": []map[string]any{{"index": 0, "delta": delta, "logprobs": nil, "finish_reason": finish}},
 		}
 		if finish != "" && (promptTokens > 0 || completionTokens > 0) {
 			chunk["usage"] = map[string]any{
@@ -617,6 +619,8 @@ func openAIError(errType, message string) map[string]any {
 		"error": map[string]any{
 			"type":    errType,
 			"message": message,
+			"param":   nil,
+			"code":    nil,
 		},
 	}
 }
