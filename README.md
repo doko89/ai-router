@@ -24,6 +24,7 @@ rewritten in Go as a configurable gateway.
 - ✅ **Rate-limit cooldown** — on `429`, skip the provider for a configurable window (default 10 min); `Retry-After` honored
 - ✅ **Token counting** — `/v1/messages/count_tokens` (tiktoken)
 - ✅ **Prompt compression** — Caveman + RTK-style compression saves 15–50%+ tokens before upstream dispatch (levels: `off`, `lite`, `standard`, `aggressive`)
+- ✅ **MCP tool bridging** — connect MCP servers (Streamable HTTP or SSE); their tools are advertised to the model and optionally auto-executed in a tool-use loop (non-streaming)
 - ✅ **YAML config**
 
 ## 📦 Build
@@ -69,6 +70,14 @@ model_aggregations:
       - provider: oc1
         model: deepseek-v4-flash-free
         weight: 50
+
+mcp_servers:              # optional; connect MCP tool servers
+  - name: search
+    type: http            # http (Streamable HTTP) | sse
+    url: https://mcp.example.com/mcp
+    bearer_token: mcp-secret
+    prefix: true          # prefix tool names with `search_`
+    auto_execute: true    # auto-run tool calls and re-dispatch
 ```
 
 **`compatible` → upstream endpoint:**
@@ -130,6 +139,31 @@ export OPENAI_BASE_URL="http://localhost:8081/v1"
 export OPENAI_API_KEY="ak-xxxxxxxx"
 ```
 
+## 🧩 MCP tools
+
+Optionally connect one or more MCP (Model Context Protocol) servers under
+`mcp_servers`. At startup the gateway connects to each, lists its tools, and
+advertises them to the model alongside the caller's own tools (non-streaming
+requests only).
+
+| Field           | Description                                                          |
+| --------------- | ------------------------------------------------------------------- |
+| `name`          | server label (also the prefix namespace when `prefix: true`)         |
+| `type`          | `http` (Streamable HTTP) or `sse`                                    |
+| `url`           | MCP server endpoint                                                  |
+| `bearer_token`  | optional, sent as `Authorization: Bearer <token>`                    |
+| `prefix`        | prefix tool names with `<name>_` (recommended for multiple servers)  |
+| `auto_execute`  | auto-run tool calls; if `false`, tool_use is returned to the caller  |
+
+When `auto_execute: true` and the model calls one of these tools, the gateway
+runs it, appends the result, and re-dispatches — repeating up to 10 rounds
+until the model stops calling tools. Auto-execute only fires when **every**
+tool_use in a turn belongs to an `auto_execute` server; a mixed turn (MCP +
+caller-defined tools) is returned to the caller unchanged.
+
+Tools are discovered once at startup; a server that fails to connect is logged
+and skipped, and the gateway continues with the rest.
+
 ## 🔧 Architecture
 
 | File                     | Responsibility                                       |
@@ -137,13 +171,14 @@ export OPENAI_API_KEY="ak-xxxxxxxx"
 | `main.go`                | flags, Fiber app, routes, bootstrap                  |
 | `config.go`              | YAML config, providers, aggregations, auth           |
 | `router.go`              | aggregation resolution + routing strategies          |
-| `handlers.go`            | auth, dispatch, failover, rate-limit cooldown, `/v1/models` |
+| `handlers.go`            | auth, dispatch, failover, rate-limit cooldown, `/v1/models`, MCP tool-use loop |
 | `openai_inbound.go`      | OpenAI `chat/completions` parsing + response mapping |
 | `types.go`               | Anthropic request types + polymorphic decoding       |
 | `transform.go`           | `chat/completions` request/response transforms       |
 | `transform_responses.go` | `responses` request/response transforms              |
 | `stream.go`              | SSE streaming translation                            |
 | `compress.go`            | prompt compression (Caveman + RTK-style, EN + ID)    |
+| `mcp_client.go`          | MCP server connections, tool discovery, auto-execution |
 | `token.go`               | tiktoken token counting                              |
 
 ## 📄 License

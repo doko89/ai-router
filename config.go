@@ -73,6 +73,7 @@ type Config struct {
 	ClientKeys        []ClientKey        `yaml:"client_keys"`
 	Providers         []Provider         `yaml:"providers"`
 	ModelAggregations []ModelAggregation `yaml:"model_aggregations"`
+	MCPServers        []MCPServerConfig  `yaml:"mcp_servers"`
 
 	providerByName map[string]*Provider
 	aggByName      map[string]*ModelAggregation

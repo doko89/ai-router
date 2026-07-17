@@ -77,3 +77,30 @@ model_aggregations:
       - provider: oc1
         model: glm-5.2
         weight: 30
+
+# MCP (Model Context Protocol) servers. Optional.
+#
+# At startup the gateway connects to each server, lists its tools, and (for
+# non-streaming requests) advertises them to the model alongside the caller's
+# own tool definitions. When `auto_execute: true` and the model calls one of
+# these tools, the gateway runs it, feeds the result back, and re-dispatches —
+# repeating up to 10 rounds until the model stops calling tools.
+#
+#   type          "http" (Streamable HTTP) or "sse"
+#   url           MCP server endpoint
+#   bearer_token  optional, sent as `Authorization: Bearer <token>`
+#   prefix        prefix discovered tool names with `<name>_` to avoid collisions
+#                 across servers (recommended when running more than one)
+#   auto_execute  auto-run tool calls; if false the tool_use is passed back to
+#                 the caller to execute
+#
+# Auto-execute only fires when EVERY tool_use in a turn belongs to an
+# auto_execute server — a mixed turn (MCP + caller tools) is returned to the
+# caller unchanged so no tool_use is left without a matching result.
+mcp_servers: []
+  # - name: search
+  #   type: http
+  #   url: https://mcp.example.com/mcp
+  #   bearer_token: mcp-secret
+  #   prefix: true
+  #   auto_execute: true

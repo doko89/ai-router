@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 // App holds shared dependencies for the HTTP handlers.
@@ -21,18 +23,20 @@ type App struct {
 	cfg          *Config
 	client       *http.Client
 	streamClient *http.Client
+	mcp          *MCPServerManager
 
 	// cooldowns maps a provider name to the time until which it should be
 	// skipped (rate-limited). Read/written concurrently.
 	cooldowns sync.Map
 }
 
-// NewApp creates an App with configured HTTP clients.
+// NewApp creates an App with configured HTTP clients and MCP manager.
 func NewApp(cfg *Config) *App {
 	return &App{
 		cfg:          cfg,
 		client:       &http.Client{Timeout: 120 * time.Second},
 		streamClient: &http.Client{},
+		mcp:          NewMCPServerManager(cfg.MCPServers),
 	}
 }
 
@@ -174,78 +178,141 @@ func (a *App) handleMessages(c fiber.Ctx) error {
 		}
 	}
 
-	candidates, exists := a.cfg.resolveCandidates(req.Model)
-	if !exists {
-		return c.Status(fiber.StatusNotFound).JSON(anthropicError("not_found_error",
-			fmt.Sprintf("model %q not found. Available: %s", req.Model, strings.Join(a.cfg.aggregationNames(), ", "))))
-	}
-	if len(candidates) == 0 {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(anthropicError("overloaded_error",
-			fmt.Sprintf("no enabled provider available for model %q", req.Model)))
+	// MCP tool merging: append MCP tools to the user's tool definitions.
+	if a.mcp != nil && a.mcp.HasTools() && !req.Stream {
+		mcpTools := a.mcp.ListAnthropicTools()
+		if len(mcpTools) > 0 {
+			// Avoid duplicates — MCP tool names are prefixed so conflicts are
+			// unlikely, but check anyway.
+			existing := make(map[string]bool, len(req.Tools))
+			for _, t := range req.Tools {
+				existing[t.Name] = true
+			}
+			for _, mt := range mcpTools {
+				if !existing[mt.Name] {
+					req.Tools = append(req.Tools, mt)
+					existing[mt.Name] = true
+				}
+			}
+			bodyBytes, _ = json.Marshal(req)
+			if a.cfg.Gateway.Debug {
+				log.Printf("[%s] merged %d MCP tools (%d total)", name, len(mcpTools), len(req.Tools))
+			}
+		}
 	}
 
-	if a.cfg.Gateway.Debug {
-		log.Printf("[%s] model=%q stream=%v candidates=%d", name, req.Model, req.Stream, len(candidates))
-	}
+	// Auto-execute loop for non-streaming requests with MCP tools.
+	// Each successful response is checked for MCP tool_use blocks; if found,
+	// the tool is executed, results appended to messages, and the request
+	// re-dispatched (up to 9 additional rounds).
+	maxMCPSteps := 10
+	isStream := req.Stream
 
-	var lastErr string
-	rateLimited := false
-	for _, tgt := range candidates {
-		if a.isProviderCooling(tgt.Provider) {
-			if a.cfg.Gateway.Debug {
-				log.Printf("  provider=%s model=%s skipped (rate-limit cooldown)", tgt.Provider.Name, tgt.Model)
-			}
-			continue
+	for mcpStep := 0; mcpStep < maxMCPSteps; mcpStep++ {
+		candidates, exists := a.cfg.resolveCandidates(req.Model)
+		if !exists {
+			return c.Status(fiber.StatusNotFound).JSON(anthropicError("not_found_error",
+				fmt.Sprintf("model %q not found. Available: %s", req.Model, strings.Join(a.cfg.aggregationNames(), ", "))))
 		}
-		resp, err := a.dispatch(tgt, bodyBytes, &req)
-		if err != nil {
-			lastErr = err.Error()
-			if a.cfg.Gateway.Debug {
-				log.Printf("  provider=%s model=%s dial error: %v", tgt.Provider.Name, tgt.Model, err)
-			}
-			continue
+		if len(candidates) == 0 {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(anthropicError("overloaded_error",
+				fmt.Sprintf("no enabled provider available for model %q", req.Model)))
 		}
-		if resp.StatusCode == http.StatusTooManyRequests {
-			rateLimited = true
-			a.markProviderCooldown(tgt.Provider, resp.Header.Get("Retry-After"))
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			if a.cfg.Gateway.Debug {
-				log.Printf("  provider=%s model=%s rate limited; cooling down", tgt.Provider.Name, tgt.Model)
-			}
-			continue
+
+		if a.cfg.Gateway.Debug && mcpStep == 0 {
+			log.Printf("[%s] model=%q stream=%v candidates=%d", name, req.Model, req.Stream, len(candidates))
 		}
-		if resp.StatusCode != http.StatusOK {
+
+		var lastErr string
+		rateLimited := false
+		dispatched := false
+
+		for _, tgt := range candidates {
+			if a.isProviderCooling(tgt.Provider) {
+				if a.cfg.Gateway.Debug {
+					log.Printf("  provider=%s model=%s skipped (rate-limit cooldown)", tgt.Provider.Name, tgt.Model)
+				}
+				continue
+			}
+			resp, err := a.dispatch(tgt, bodyBytes, &req)
+			if err != nil {
+				lastErr = err.Error()
+				if a.cfg.Gateway.Debug {
+					log.Printf("  provider=%s model=%s dial error: %v", tgt.Provider.Name, tgt.Model, err)
+				}
+				continue
+			}
+			if resp.StatusCode == http.StatusTooManyRequests {
+				rateLimited = true
+				a.markProviderCooldown(tgt.Provider, resp.Header.Get("Retry-After"))
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				if a.cfg.Gateway.Debug {
+					log.Printf("  provider=%s model=%s rate limited; cooling down", tgt.Provider.Name, tgt.Model)
+				}
+				continue
+			}
+			if resp.StatusCode != http.StatusOK {
+				data, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				lastErr = fmt.Sprintf("upstream %d from %s", resp.StatusCode, tgt.Provider.Name)
+				if a.cfg.Gateway.Debug {
+					log.Printf("  provider=%s model=%s status=%d body=%s", tgt.Provider.Name, tgt.Model, resp.StatusCode, string(data))
+				}
+				continue
+			}
+
+			dispatched = true
+
+			if a.cfg.Gateway.Debug {
+				log.Printf("[%s] → provider=%s model=%s compatible=%s stream=%v (step %d)", name, tgt.Provider.Name, tgt.Model, tgt.Provider.Compatible, isStream, mcpStep)
+			}
+
+			if isStream {
+				return a.streamResponse(c, tgt.Provider.Compatible, resp)
+			}
+
+			// Non-streaming: read response and check for MCP tool_use.
 			data, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			lastErr = fmt.Sprintf("upstream %d from %s", resp.StatusCode, tgt.Provider.Name)
-			if a.cfg.Gateway.Debug {
-				log.Printf("  provider=%s model=%s status=%d body=%s", tgt.Provider.Name, tgt.Model, resp.StatusCode, string(data))
+
+			if a.mcp != nil && mcpStep < maxMCPSteps-1 {
+				modified, newBody, err := a.handleMCPStep(data, &req, tgt.Provider.Compatible, name)
+				if err != nil {
+					return c.Status(fiber.StatusBadGateway).JSON(anthropicError("api_error",
+						fmt.Sprintf("mcp execution error: %v", err)))
+				}
+				if modified {
+					bodyBytes = newBody
+					if a.cfg.Gateway.Debug {
+						log.Printf("[%s] mcp tool_use handled, re-dispatching (step %d)", name, mcpStep+1)
+					}
+					break // out of candidate loop → continue outer loop
+				}
 			}
-			continue
+
+			// No MCP tool_use → return response to caller.
+			return a.sendJSONResponse(c, tgt.Provider.Compatible, data)
 		}
 
-		if a.cfg.Gateway.Debug {
-			log.Printf("[%s] → provider=%s model=%s compatible=%s stream=%v", name, tgt.Provider.Name, tgt.Model, tgt.Provider.Compatible, req.Stream)
+		if !dispatched {
+			// All candidates exhausted.
+			if rateLimited {
+				retryAfter := a.retryAfterFor(candidates)
+				if retryAfter <= 0 {
+					retryAfter = 1
+				}
+				c.Set(fiber.HeaderRetryAfter, fmt.Sprintf("%d", retryAfter))
+				return c.Status(fiber.StatusTooManyRequests).JSON(
+					anthropicError("rate_limit_error", fmt.Sprintf("all providers rate limited; retry after %d seconds", retryAfter)))
+			}
+			return c.Status(fiber.StatusBadGateway).JSON(
+				anthropicError("api_error", "all providers failed: "+lastErr))
 		}
-		if req.Stream {
-			return a.streamResponse(c, tgt.Provider.Compatible, resp)
-		}
-		return a.jsonResponse(c, tgt.Provider.Compatible, resp)
 	}
 
-	if rateLimited {
-		retryAfter := a.retryAfterFor(candidates)
-		if retryAfter <= 0 {
-			retryAfter = 1
-		}
-		c.Set(fiber.HeaderRetryAfter, fmt.Sprintf("%d", retryAfter))
-		return c.Status(fiber.StatusTooManyRequests).JSON(
-			anthropicError("rate_limit_error", fmt.Sprintf("all providers rate limited; retry after %d seconds", retryAfter)))
-	}
-
-	return c.Status(fiber.StatusBadGateway).JSON(
-		anthropicError("api_error", "all providers failed: "+lastErr))
+	return c.Status(fiber.StatusInternalServerError).JSON(
+		anthropicError("overloaded_error", "maximum MCP auto-execute steps reached"))
 }
 
 // dispatch builds and sends the upstream request for a target.
@@ -286,6 +353,131 @@ func (a *App) dispatch(tgt Target, bodyBytes []byte, req *AnthropicRequest) (*ht
 		client = a.streamClient
 	}
 	return client.Do(httpReq)
+}
+
+// sendJSONResponse sends a non-streaming response from already-read data.
+func (a *App) sendJSONResponse(c fiber.Ctx, compat Compatible, data []byte) error {
+	switch compat {
+	case CompatibleAnthropic:
+		c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+		return c.Send(data)
+	case CompatibleOpenAIResponses:
+		var parsed V1ResponsesResponse
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			return c.Status(fiber.StatusBadGateway).JSON(anthropicError("api_error", err.Error()))
+		}
+		return c.JSON(transformV1ResponsesResponse(&parsed))
+	default:
+		var parsed OpenAIResponse
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			return c.Status(fiber.StatusBadGateway).JSON(anthropicError("api_error", err.Error()))
+		}
+		return c.JSON(transformOpenAIResponse(&parsed))
+	}
+}
+
+// handleMCPStep checks a non-streaming upstream response for MCP tool_use blocks.
+// When MCP tool_use is found with auto_execute enabled:
+//   - The full assistant message (text + tool_use) is appended to req.Messages
+//   - Each MCP tool is executed via CallTool
+//   - The results are appended as a user message with tool_result blocks
+//   - The request is re-marshaled into newBody for re-dispatch
+//
+// Returns (modified=true, newBody, nil) when MCP tools were executed.
+// Returns (modified=false, nil, nil) when no MCP tool_use is found.
+func (a *App) handleMCPStep(data []byte, req *AnthropicRequest, compat Compatible, name string) (bool, []byte, error) {
+	// Parse tool_use from the upstream response in its native dialect. The
+	// request we re-dispatch is always Anthropic-shaped (the inbound format),
+	// but the upstream response follows the target provider's dialect.
+	var blocks []ContentBlock
+	var uses []toolUseBlock
+	switch compat {
+	case CompatibleAnthropic:
+		blocks, uses = findToolUseFromAnthropic(data)
+	case CompatibleOpenAIResponses:
+		blocks, uses = findToolUseFromResponses(data)
+	default: // openai chat completions
+		blocks, uses = findToolUseFromOpenAI(data)
+	}
+	if len(uses) == 0 {
+		return false, nil, nil
+	}
+
+	// Partition tool_use blocks: MCP-managed tools with auto_execute vs. the rest.
+	// Auto-execute only when EVERY tool_use is MCP-auto — a mixed turn would leave
+	// a non-MCP tool_use without a matching tool_result on re-dispatch, which the
+	// upstream API rejects. Mixed or non-auto turns are returned to the client as-is.
+	var mcpUses, otherUses []toolUseBlock
+	for _, u := range uses {
+		if a.mcp.ToolAutoExecute(u.Name) {
+			mcpUses = append(mcpUses, u)
+		} else {
+			otherUses = append(otherUses, u)
+		}
+	}
+	if len(mcpUses) == 0 || len(otherUses) > 0 {
+		return false, nil, nil
+	}
+
+	if a.cfg.Gateway.Debug {
+		log.Printf("[%s] mcp: %d tool_use blocks to auto-execute", name, len(mcpUses))
+	}
+
+	// Append assistant message with ALL original content blocks (text + tool_use).
+	req.Messages = append(req.Messages, AnthropicMessage{
+		Role:    "assistant",
+		Content: &StringOrBlocks{Blocks: blocks},
+	})
+
+	// Execute each MCP tool and build tool_result blocks.
+	ctx := context.Background()
+	var toolResults []ContentBlock
+	for _, u := range mcpUses {
+		result, err := a.mcp.CallTool(ctx, u.Name, u.Input)
+		text := "Success"
+		if err != nil {
+			text = "Error: " + err.Error()
+			if a.cfg.Gateway.Debug {
+				log.Printf("[%s] mcp: tool %q error: %v", name, u.Name, err)
+			}
+		} else if result != nil {
+			text = formatToolResult(result)
+		}
+
+		toolResults = append(toolResults, ContentBlock{
+			Type:      "tool_result",
+			ToolUseID: u.ID,
+			Content:   &StringOrBlocks{IsString: true, Str: text},
+		})
+	}
+
+	// Append user message with all tool results.
+	req.Messages = append(req.Messages, AnthropicMessage{
+		Role:    "user",
+		Content: &StringOrBlocks{Blocks: toolResults},
+	})
+
+	// Re-marshal request body.
+	newBody, err := json.Marshal(req)
+	if err != nil {
+		return false, nil, fmt.Errorf("re-marshal after MCP tool_use: %w", err)
+	}
+
+	return true, newBody, nil
+}
+
+// formatToolResult extracts text from an MCP CallToolResult.
+func formatToolResult(result *mcp.CallToolResult) string {
+	var texts []string
+	for _, c := range result.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			texts = append(texts, tc.Text)
+		}
+	}
+	if len(texts) == 0 {
+		return "Success"
+	}
+	return strings.Join(texts, "\n")
 }
 
 // jsonResponse transforms and returns a non-streaming upstream response.
