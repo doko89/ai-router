@@ -47,6 +47,8 @@ func streamOpenAIToAnthropic(w *bufio.Writer, body io.Reader) {
 	})
 
 	currentBlockIndex := 0
+	toolCallIDByIndex := map[int]string{}
+	toolCallNameByIndex := map[int]string{}
 	writeSSE(w, "content_block_start", map[string]any{
 		"type": "content_block_start", "index": currentBlockIndex,
 		"content_block": map[string]any{"type": "text", "text": ""},
@@ -100,45 +102,38 @@ func streamOpenAIToAnthropic(w *bufio.Writer, body io.Reader) {
 
 		// Tool calls.
 		if tcs, ok := delta["tool_calls"].([]any); ok && len(tcs) > 0 {
-			tc, _ := tcs[0].(map[string]any)
-			targetIndex := int(toFloat(tc["index"])) + 1
+			for _, tcRaw := range tcs {
+				tc, _ := tcRaw.(map[string]any)
+				tcIndex := int(toFloat(tc["index"]))
+				targetIndex := tcIndex + 1
 
-			if targetIndex != currentBlockIndex {
-				writeSSE(w, "content_block_stop", map[string]any{
-					"type": "content_block_stop", "index": currentBlockIndex,
-				})
-				currentBlockIndex = targetIndex
-				writeSSE(w, "content_block_start", map[string]any{
-					"type": "content_block_start", "index": currentBlockIndex,
-					"content_block": map[string]any{
-						"type": "tool_use", "id": "", "name": "", "input": map[string]any{},
-					},
-				})
-			}
+				// Track tool call id and name across chunks (OpenAI sends them
+				// in the first chunk for each index, then arguments separately).
+				if id, ok := tc["id"].(string); ok && id != "" {
+					toolCallIDByIndex[tcIndex] = id
+				}
+				if fn, ok := tc["function"].(map[string]any); ok {
+					if name, ok := fn["name"].(string); ok && name != "" {
+						toolCallNameByIndex[tcIndex] = name
+					}
+				}
 
-			if fn, ok := tc["function"].(map[string]any); ok {
-				if id, ok := fn["name"].(string); ok && id != "" {
-					writeSSE(w, "content_block_delta", map[string]any{
-						"type": "content_block_delta", "index": currentBlockIndex,
-						"delta": map[string]any{"type": "input_json_delta", "partial_json": ""},
+				if targetIndex != currentBlockIndex {
+					writeSSE(w, "content_block_stop", map[string]any{
+						"type": "content_block_stop", "index": currentBlockIndex,
+					})
+					currentBlockIndex = targetIndex
+					writeSSE(w, "content_block_start", map[string]any{
+						"type": "content_block_start", "index": currentBlockIndex,
+						"content_block": map[string]any{
+							"type": "tool_use",
+							"id":   toolCallIDByIndex[tcIndex],
+							"name": toolCallNameByIndex[tcIndex],
+							"input": map[string]any{},
+						},
 					})
 				}
-				// Emit name on first tool call block.
-				if name, ok := fn["name"].(string); ok && name != "" {
-					writeSSE(w, "content_block_delta", map[string]any{
-						"type": "content_block_delta", "index": currentBlockIndex,
-						"delta": map[string]any{"type": "input_json_delta", "partial_json": ""},
-					})
-				}
-			}
 
-			// tool_call id.
-			if id, ok := tc["id"].(string); ok && id != "" {
-				// Anthropic sends the tool id in content_block_start, but OpenAI
-				// streams it in the delta. We work around this by sending a
-				// separate content_block_start for each new tool index (above)
-				// and then patching the id via input_json_delta alongside the
-				// function name.
 				if fn, ok := tc["function"].(map[string]any); ok {
 					if args, ok := fn["arguments"].(string); ok && args != "" {
 						writeSSE(w, "content_block_delta", map[string]any{
@@ -146,20 +141,6 @@ func streamOpenAIToAnthropic(w *bufio.Writer, body io.Reader) {
 							"delta": map[string]any{"type": "input_json_delta", "partial_json": args},
 						})
 					}
-				}
-			}
-
-			// tool_call id (simplified).
-			if id, ok := tc["id"].(string); ok && id != "" {
-				_ = id
-			}
-
-			if fn, ok := tc["function"].(map[string]any); ok {
-				if args, ok := fn["arguments"].(string); ok && args != "" {
-					writeSSE(w, "content_block_delta", map[string]any{
-						"type": "content_block_delta", "index": currentBlockIndex,
-						"delta": map[string]any{"type": "input_json_delta", "partial_json": args},
-					})
 				}
 			}
 		}

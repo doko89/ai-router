@@ -2,6 +2,7 @@ package main
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -29,18 +30,19 @@ const (
 )
 
 func normalizeLevel(level string) string {
-	switch level {
+	switch strings.ToLower(level) {
 	case "agressive", "agresive":
 		return CompressionAggressive
 	case "standart", "standar":
 		return CompressionStandard
 	default:
-		return level
+		return strings.ToLower(level)
 	}
 }
 
 var (
 	ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	wsRegexp   = regexp.MustCompile(`\s+`)
 
 	// fillerRules: pleasantries, hedging, filler words, polite framing, qualifiers
 	fillerRules = []rule{
@@ -50,7 +52,7 @@ var (
 		{regexp.MustCompile(`(?i)\b(?:i'?d be happy to|i would be happy to|i'?d be glad to|glad to help|happy to|of course|certainly|absolutely)\b[,.!?\s]*`), "", ctxAll},
 
 		// polite framing
-		{regexp.MustCompile(`(?i)\b(?:please|kindly|could you please|would you please|can you please|i would like you to|i want you to|i need you to)\b\s*`), "", ctxAll},
+		{regexp.MustCompile(`(?i)\b(?:please|kindly|could you please|would you please|can you please|i would like you to|i want you to|i need you to)\b[,.!?\s]*`), "", ctxAll},
 		{regexp.MustCompile(`(?i)\b(?:i was wondering if you could|would it be possible to)\b\s*`), "", ctxUser},
 
 		// hedging
@@ -70,7 +72,7 @@ var (
 		{regexp.MustCompile(`(?i)\b(?:a bit|a little|somewhat|kind of|sort of)\b\s*`), "", ctxAll},
 		{regexp.MustCompile(`(?i)\b(?:if possible|when you get a chance|at your convenience|just wondering)\b[,.!?\s]*`), "", ctxAll},
 		{regexp.MustCompile(`(?i)\b(?:i guess|i suppose|more or less|in a way)\b\s*`), "", ctxAll},
-		{regexp.MustCompile(`(?i)\b(?:like|you know|i mean)\b\s*`), "", ctxAll},
+		{regexp.MustCompile(`(?i)\b(?:you know|i mean)\b\s*`), "", ctxAll},
 
 		// verbose instructions
 		{regexp.MustCompile(`(?i)\b(?:provide a detailed explanation of|give me a comprehensive|write an in-depth|create a thorough|explain in detail)\b`), "explain", ctxAll},
@@ -154,7 +156,8 @@ var (
 		{regexp.MustCompile(`(?i)\bin relation to\b`), "about", ctxAll},
 		{regexp.MustCompile(`(?i)\bin addition to\b`), "also", ctxAll},
 		{regexp.MustCompile(`(?i)\ba lot of\b`), "many", ctxAll},
-		{regexp.MustCompile(`(?i)\bnot only .*? but also\b`), "", ctxAll},
+		{regexp.MustCompile(`(?i)\bnot only\b`), "", ctxAll},
+		{regexp.MustCompile(`(?i)\bbut also\b`), "also", ctxAll},
 	}
 
 	// dedupRules: repeated context markers, summary replacements
@@ -203,12 +206,12 @@ var (
 		{regexp.MustCompile(`(?i)\b(?:dengan senang hati|senang bisa membantu|ikut senang)\b[,.!?\s]*`), "", ctxAll},
 
 		// polite framing
-		{regexp.MustCompile(`(?i)\b(?:mohon|tolong|tlg|bisa tolong|mohon bantuannya|minta tolong)\b\s*`), "", ctxAll},
+		{regexp.MustCompile(`(?i)\b(?:mohon|tolong|tlg|bisa tolong|mohon bantuannya|minta tolong)\b[,.!?\s]*`), "", ctxAll},
 		{regexp.MustCompile(`(?i)\b(?:saya ingin|saya mau|saya butuh|aku ingin|gw mau|gua mau|saya pengen)\b\s*`), "", ctxUser},
-		{regexp.MustCompile(`(?i)\b(?:bisa tolong|bisa minta|bantuin|tolongin)\b\s*`), "", ctxUser},
+		{regexp.MustCompile(`(?i)\b(?:bisa tolong|bisa minta|bantuin|tolongin)\b[,.!?\s]*`), "", ctxUser},
 
 		// hedging
-		{regexp.MustCompile(`(?i)\b(?:sepertinya|tampaknya|rasanya|kiranya|kayaknya|sepertinya|sepertinya)\b\s*`), "", ctxAll},
+		{regexp.MustCompile(`(?i)\b(?:sepertinya|tampaknya|rasanya|kiranya|kayaknya)\b\s*`), "", ctxAll},
 		{regexp.MustCompile(`(?i)\b(?:saya rasa|saya kira|saya pikir|menurut saya|menurut ku|menurut gue)\b\s*`), "", ctxAll},
 		{regexp.MustCompile(`(?i)\b(?:mungkin|barangkali|bisa jadi|boleh jadi)\b\s*`), "", ctxAll},
 
@@ -251,7 +254,7 @@ var (
 		{regexp.MustCompile(`(?i)\b(?:saya punya kode berikut|berikut adalah kode saya|berikut kodenya|ini kodenya|kode di bawah ini)\b\s*[:.]?\s*`), "Kode: ", ctxUser},
 		{regexp.MustCompile(`(?i)\b(?:ini filenya|berikut isi filenya|berkasnya|berikut isi berkasnya)\b\s*[:.]?\s*`), "File: ", ctxUser},
 		{regexp.MustCompile(`(?i)\b(?:apa yang saya coba lakukan|tujuan saya adalah|yang saya butuhkan adalah|saya menargetkan)\b\s*`), "Tujuan: ", ctxUser},
-		{regexp.MustCompile(`(?i)\b(?:bisa jelaskan kenapa|bisa tunjukkan bagaimana|tolong jelasin|tolong infoin|kasih tau gimana|tunjukkan cara)\b\s*`), "Jelaskan: ", ctxUser},
+		{regexp.MustCompile(`(?i)\b(?:bisa jelaskan kenapa|bisa tunjukkan bagaimana|tolong jelasin|tolong infoin|kasih tau gimana|tunjukkan cara)\b[,.!?\s]*`), "Jelaskan: ", ctxUser},
 		{regexp.MustCompile(`(?i)\b(?:fungsi ini|kode ini|kelas ini|modul ini)\s+(?:nampaknya|tampaknya|sepertinya)\b`), "", ctxAll},
 		{regexp.MustCompile(`(?i)\b(?:seperti yang anda ketahui|seperti yang kita diskusikan sebelumnya)\b,?\s*`), "", ctxAll},
 		{regexp.MustCompile(`(?i)^(?:catat bahwa|perlu diingat bahwa|ingat bahwa)\b\s*`), "", ctxAll},
@@ -428,10 +431,15 @@ func stripANSI(s string) string {
 
 func collapseWhitespace(s string) string {
 	lines := strings.Split(s, "\n")
-	ws := regexp.MustCompile(`\s+`)
 	for i, line := range lines {
-		lines[i] = ws.ReplaceAllString(line, " ")
-		lines[i] = strings.TrimSpace(lines[i])
+		// Preserve leading whitespace (code indentation)
+		trimmed := strings.TrimLeft(line, " \t")
+		leading := line[:len(line)-len(trimmed)]
+		// Collapse internal multi-whitespace runs to single space
+		collapsed := wsRegexp.ReplaceAllString(trimmed, " ")
+		// Trim trailing space
+		collapsed = strings.TrimRight(collapsed, " ")
+		lines[i] = leading + collapsed
 	}
 	return strings.Join(lines, "\n")
 }
@@ -574,24 +582,5 @@ func compressToolResult(s string, level string) string {
 }
 
 func intToString(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	pos := len(buf)
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
+	return strconv.Itoa(n)
 }
