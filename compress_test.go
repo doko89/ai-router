@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -347,6 +349,87 @@ func TestCompressString_codeIndentation(t *testing.T) {
 	}
 }
 
+func TestCompressString_aggressivePreservesTechnicalContent(t *testing.T) {
+	tests := []struct {
+		name      string
+		protected string
+		input     string
+	}{
+		{
+			name:      "fenced code",
+			protected: "```go\nconfig := map[string]bool{\"maybe\": true}\n```",
+			input:     "Please inspect this:\n```go\nconfig := map[string]bool{\"maybe\": true}\n```\nThanks",
+		},
+		{
+			name:      "ANSI sequence inside code",
+			protected: "```text\n\x1b[31mERROR\x1b[0m\n```",
+			input:     "Please inspect:\n```text\n\x1b[31mERROR\x1b[0m\n```\nThanks",
+		},
+		{
+			name:      "unclosed fenced code",
+			protected: "```go\nfunc main() {\n\tfmt.Println(\"really   literal\")\n}",
+			input:     "Please inspect:\n```go\nfunc main() {\n\tfmt.Println(\"really   literal\")\n}",
+		},
+		{
+			name:      "inline code",
+			protected: "`maybe := \"really   needed\"`",
+			input:     "Please keep `maybe := \"really   needed\"` exactly, thanks",
+		},
+		{
+			name:      "URL",
+			protected: "https://example.com/current/really?maybe=true",
+			input:     "Please open https://example.com/current/really?maybe=true, thanks",
+		},
+		{
+			name:      "JSON object",
+			protected: `{"maybe":true,"message":"really   important","nested":{"current":"value"}}`,
+			input:     `Please send {"maybe":true,"message":"really   important","nested":{"current":"value"}}, thanks`,
+		},
+		{
+			name:      "JSON array",
+			protected: `["maybe",{"currently":"really   useful"}]`,
+			input:     `Please send ["maybe",{"currently":"really   useful"}], thanks`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := compressString(tt.input, CompressionAggressive, "user")
+			if !strings.Contains(got, tt.protected) {
+				t.Fatalf("protected content changed:\ngot:  %q\nwant protected: %q", got, tt.protected)
+			}
+		})
+	}
+}
+
+func TestCompressString_aggressiveStillCompressesProse(t *testing.T) {
+	input := "Please basically explain in detail how this implementation is currently being used"
+	got := compressString(input, CompressionAggressive, "user")
+	if got == input {
+		t.Fatal("aggressive mode did not compress eligible prose")
+	}
+	if !strings.Contains(got, "impl") {
+		t.Fatalf("aggressive mode lost technical substance: %q", got)
+	}
+}
+
+func TestCompressString_aggressivePreservesLongCodeBlock(t *testing.T) {
+	lines := make([]string, 120)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %03d: maybe really   current", i)
+	}
+	code := "```text\n" + strings.Join(lines, "\n") + "\n```"
+	input := "Please inspect this code:\n" + code + "\nThanks"
+
+	got := compressString(input, CompressionAggressive, "user")
+	if !strings.Contains(got, code) {
+		t.Fatal("aggressive truncation changed a protected long code block")
+	}
+	if strings.Contains(got, "lines truncated") {
+		t.Fatal("protected code block counted toward aggressive line truncation")
+	}
+}
+
 func TestCompressString_pleasePunctuation(t *testing.T) {
 	t.Run("orphan comma after please", func(t *testing.T) {
 		input := "Could you please, explain this"
@@ -451,4 +534,15 @@ func searchString(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func BenchmarkCompressStringAggressive(b *testing.B) {
+	prose := strings.Repeat("Please basically explain in detail how this implementation is currently being used.\n", 80)
+	code := "```go\n" + strings.Repeat("if maybe { fmt.Println(\"really   important\") }\n", 80) + "```"
+	input := prose + code
+
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = compressString(input, CompressionAggressive, "user")
+	}
 }
