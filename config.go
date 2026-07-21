@@ -25,6 +25,7 @@ type GatewayConfig struct {
 	Debug             bool   `yaml:"debug"`
 	TiktokenEncoding  string `yaml:"tiktoken_encoding"`
 	RateLimitCooldown int    `yaml:"rate_limit_cooldown"` // seconds; default 600 (10 min), 0 disables
+	RateLimitScope    string `yaml:"rate_limit_scope"`    // "provider" or "model"; default "provider"
 	Compression       string `yaml:"compression"`         // off, lite, standard, aggressive; empty = off
 }
 
@@ -109,6 +110,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Gateway.RateLimitCooldown == 0 {
 		c.Gateway.RateLimitCooldown = 600
+	}
+	if c.Gateway.RateLimitScope == "" {
+		c.Gateway.RateLimitScope = "provider"
 	}
 	for i := range c.Providers {
 		if c.Providers[i].Compatible == "" {

@@ -253,3 +253,89 @@ func TestReasoningTokensForwardedAnthropic(t *testing.T) {
 		t.Fatalf("want completion_tokens_details.reasoning_tokens=3, got %v (body=%s)", usage["completion_tokens_details"], string(body))
 	}
 }
+
+func TestModelScopeCooldownFailover(t *testing.T) {
+	reqCount := 0
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reqCount++
+		rc := reqCount
+		mu.Unlock()
+		if rc == 1 {
+			w.Header().Set("Retry-After", "30")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"rate limited"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Gateway:    GatewayConfig{Host: "127.0.0.1", Port: 0, TiktokenEncoding: "cl100k_base", RateLimitCooldown: 30, RateLimitScope: "model"},
+		ClientKeys: []ClientKey{{Key: "test", Name: "test"}},
+		Providers:  []Provider{{Name: "p1", Enabled: true, Compatible: CompatibleOpenAI, BaseURL: srv.URL, APIKey: "x"}},
+		ModelAggregations: []ModelAggregation{{
+			Name: "m", Strategy: "failover",
+			Models: []AggModel{{Provider: "p1", Model: "m-a"}, {Provider: "p1", Model: "m-b"}},
+		}},
+	}
+	cfg.buildIndexes()
+	app := buildApp(cfg)
+
+	resp := doReqResp(t, app, "/v1/chat/completions", "Bearer test",
+		`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("first call: want 200 (failover m-a→m-b same provider), got %d", resp.StatusCode)
+	}
+
+	resp2 := doReqResp(t, app, "/v1/chat/completions", "Bearer test",
+		`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	if resp2.StatusCode != 200 {
+		t.Fatalf("second call: want 200 (m-a cooling, m-b available), got %d", resp2.StatusCode)
+	}
+}
+
+func TestProviderScopeCooldownBlocksAllModels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"rate limited"}`))
+	}))
+	defer srv.Close()
+
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer ok.Close()
+
+	cfg := &Config{
+		Gateway:    GatewayConfig{Host: "127.0.0.1", Port: 0, TiktokenEncoding: "cl100k_base", RateLimitCooldown: 30, RateLimitScope: "provider"},
+		ClientKeys: []ClientKey{{Key: "test", Name: "test"}},
+		Providers: []Provider{
+			{Name: "p1", Enabled: true, Compatible: CompatibleOpenAI, BaseURL: srv.URL, APIKey: "x"},
+			{Name: "p2", Enabled: true, Compatible: CompatibleOpenAI, BaseURL: ok.URL, APIKey: "x"},
+		},
+		ModelAggregations: []ModelAggregation{{
+			Name: "m", Strategy: "failover",
+			Models: []AggModel{{Provider: "p1", Model: "m-a"}, {Provider: "p1", Model: "m-b"}, {Provider: "p2", Model: "m-c"}},
+		}},
+	}
+	cfg.buildIndexes()
+	app := buildApp(cfg)
+
+	resp := doReqResp(t, app, "/v1/chat/completions", "Bearer test",
+		`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("first call: want 200 (failover to p2), got %d", resp.StatusCode)
+	}
+
+	resp2 := doReqResp(t, app, "/v1/chat/completions", "Bearer test",
+		`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	if resp2.StatusCode != 200 {
+		t.Fatalf("second call: want 200 (p1 cooling, p2 available), got %d", resp2.StatusCode)
+	}
+}
