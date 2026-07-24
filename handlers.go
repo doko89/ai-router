@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"anthropic-adapter/compression"
+
 	"github.com/gofiber/fiber/v3"
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -170,21 +172,21 @@ func (a *App) handleMessages(c fiber.Ctx) error {
 			anthropicError("invalid_request_error", err.Error()))
 	}
 
-	if a.cfg.Gateway.Compression != "" && a.cfg.Gateway.Compression != CompressionOff {
+	if a.cfg.Gateway.Compression != "" && a.cfg.Gateway.Compression != compression.CompressionOff {
 		level := a.cfg.Gateway.Compression
 		var origBody []byte
 		origBody, bodyBytes = bodyBytes, nil
-		compressAnthropicRequest(&req, level)
+		compressRequest(&req, level)
 		bodyBytes, _ = json.Marshal(req)
 		if len(bodyBytes) > len(origBody) {
 			bodyBytes = origBody
 			if a.cfg.Gateway.Debug {
-				log.Printf("[%s] compression inflated %d→%d bytes, discarded level=%s", name, len(origBody), len(bodyBytes), normalizeLevel(level))
+				log.Printf("[%s] compression inflated %d→%d bytes, discarded level=%s", name, len(origBody), len(bodyBytes), level)
 			}
 		} else if a.cfg.Gateway.Debug {
 			saved := len(origBody) - len(bodyBytes)
 			pct := 100 * saved / len(origBody)
-			log.Printf("[%s] compression saved %d%% (%d→%d, -%d) level=%s", name, pct, len(origBody), len(bodyBytes), saved, normalizeLevel(level))
+			log.Printf("[%s] compression saved %d%% (%d→%d, -%d) level=%s", name, pct, len(origBody), len(bodyBytes), saved, level)
 		}
 	}
 
@@ -573,11 +575,11 @@ func (a *App) handleChatCompletions(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(openAIError("api_error", err.Error()))
 	}
 
-	if a.cfg.Gateway.Compression != "" && a.cfg.Gateway.Compression != CompressionOff {
+	if a.cfg.Gateway.Compression != "" && a.cfg.Gateway.Compression != compression.CompressionOff {
 		level := a.cfg.Gateway.Compression
 		var origBody []byte
 		origBody, bodyBytes = bodyBytes, nil
-		compressAnthropicRequest(req, level)
+		compressRequest(req, level)
 		bodyBytes, _ = json.Marshal(req)
 		if len(bodyBytes) > len(origBody) {
 			bodyBytes = origBody
@@ -585,7 +587,7 @@ func (a *App) handleChatCompletions(c fiber.Ctx) error {
 		if a.cfg.Gateway.Debug {
 			saved := len(origBody) - len(bodyBytes)
 			pct := 100 * saved / len(origBody)
-			log.Printf("[%s|openai] compression saved %d%% (%d→%d, -%d) level=%s", name, pct, len(origBody), len(bodyBytes), saved, normalizeLevel(level))
+			log.Printf("[%s|openai] compression saved %d%% (%d→%d, -%d) level=%s", name, pct, len(origBody), len(bodyBytes), saved, level)
 		}
 	}
 
